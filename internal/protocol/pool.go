@@ -93,7 +93,7 @@ func (p *Pool) GetCode(ctx context.Context, loginBuffer, appID string, accountID
 		if err != nil {
 			return nil, err
 		}
-		code, resp, err := p.sendEnvelope(ctx, st, envelope)
+		code, _, err := p.sendEnvelope(ctx, st, envelope)
 		if err != nil {
 			return nil, err
 		}
