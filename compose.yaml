@@ -68,6 +68,8 @@ services:
       PROXY_PORT: "8787"
       YYB_URL: "http://yyb-go:8000"
       AUTH_TOKEN: "aa06c54e82f5439dc025e5f223b6466f"
+    volumes:
+      - ./wx-proxy/wx-proxy.py:/app/wx-proxy.py:ro
     ports:
       - "0.0.0.0:8787:8787"
     networks:

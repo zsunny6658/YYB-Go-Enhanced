@@ -84,10 +84,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _forward_post_yyb(self, path, body):
-        """把 POST body 原样透传到 YYB 对应路径，返回原始响应。"""
+        """把 POST body 转发到 YYB 对应路径，做参数映射，返回原始响应。
+
+        smallfawn 脚本发 {appid, openid}，YYB 需要 {app_id, ref}。
+        """
+        try:
+            parsed_body = json.loads(body) if body else {}
+        except Exception:
+            parsed_body = {}
+
+        # 参数映射：openid -> ref, appid -> app_id
+        mapped = {}
+        mapped["ref"] = parsed_body.get("ref") or parsed_body.get("openid") or ""
+        mapped["app_id"] = parsed_body.get("app_id") or parsed_body.get("appid") or ""
+        # 透传其他字段
+        for k, v in parsed_body.items():
+            if k not in ("ref", "openid", "app_id", "appid"):
+                mapped[k] = v
+
         req = urllib.request.Request(
             f"{YYB_URL}{path}",
-            data=body,
+            data=json.dumps(mapped).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
@@ -98,9 +115,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     parsed = json.loads(raw)
                 except Exception:
                     parsed = raw
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.wfile.write(json.dumps({"status": True, "data": parsed}, ensure_ascii=False).encode("utf-8"))
+                self._send_json(200, {"status": True, "data": parsed})
         except urllib.error.HTTPError as e:
             raw = e.read().decode("utf-8", errors="replace")
             self._send_json(502, {"status": False, "message": f"YYB {e.code}: {raw}"})
