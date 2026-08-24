@@ -6,12 +6,24 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
 	"time"
 )
+
+var ErrMissingRefreshToken = errors.New("missing refresh token")
+
+type RefreshRejectedError struct {
+	Code    int
+	Message string
+}
+
+func (e *RefreshRejectedError) Error() string {
+	return fmt.Sprintf("refresh failed: code=%d msg=%s", e.Code, e.Message)
+}
 
 const (
 	yybHost         = "https://yybadaccess.3g.qq.com"
@@ -23,37 +35,50 @@ const (
 )
 
 type LoginBufferCredentials struct {
-	OpenID       string `json:"openid"`
-	AccessToken  string `json:"accesstoken"`
-	RefreshToken string `json:"refreshtoken"`
-	LoginType    string `json:"logintype"`
-	Nickname     string `json:"nickname"`
-	ExpiresAt    int64  `json:"expires_at"`
-	ExpiresIn    int64  `json:"expires_in"`
+	OpenID                 string `json:"openid"`
+	AccessToken            string `json:"accesstoken"`
+	RefreshToken           string `json:"refreshtoken"`
+	RefreshTokenObservedAt int64  `json:"refresh_token_observed_at"`
+	LoginType              string `json:"logintype"`
+	Nickname               string `json:"nickname"`
+	ExpiresAt              int64  `json:"expires_at"`
+	ExpiresIn              int64  `json:"expires_in"`
 }
 
 func CredentialsFromMap(m map[string]any) LoginBufferCredentials {
+	expiresIn := defaultInt64(int64FromMap(m, "expires_in"), 7200)
+	expiresAt := int64FromMap(m, "expires_at")
+	if expiresAt <= 0 {
+		if refreshedAt := int64FromMap(m, "refresh_refreshed_at"); refreshedAt > 0 {
+			expiresAt = refreshedAt + expiresIn
+		}
+	}
 	return LoginBufferCredentials{
-		OpenID:       stringFromMap(m, "openid"),
-		AccessToken:  stringFromMap(m, "accesstoken"),
-		RefreshToken: stringFromMap(m, "refreshtoken"),
-		LoginType:    defaultString(stringFromMap(m, "logintype"), "WX"),
-		Nickname:     stringFromMap(m, "nickname"),
-		ExpiresAt:    int64FromMap(m, "expires_at"),
-		ExpiresIn:    defaultInt64(int64FromMap(m, "expires_in"), 7200),
+		OpenID:                 stringFromMap(m, "openid"),
+		AccessToken:            stringFromMap(m, "accesstoken"),
+		RefreshToken:           stringFromMap(m, "refreshtoken"),
+		RefreshTokenObservedAt: int64FromMap(m, "refresh_token_observed_at"),
+		LoginType:              defaultString(stringFromMap(m, "logintype"), "WX"),
+		Nickname:               stringFromMap(m, "nickname"),
+		ExpiresAt:              expiresAt,
+		ExpiresIn:              expiresIn,
 	}
 }
 
 func (c LoginBufferCredentials) ToMap() map[string]any {
+	if c.RefreshToken != "" && c.RefreshTokenObservedAt <= 0 {
+		c.RefreshTokenObservedAt = time.Now().Unix()
+	}
 	return map[string]any{
-		"openid":               c.OpenID,
-		"accesstoken":          c.AccessToken,
-		"refreshtoken":         c.RefreshToken,
-		"logintype":            defaultString(c.LoginType, "WX"),
-		"nickname":             c.Nickname,
-		"expires_at":           c.ExpiresAt,
-		"expires_in":           defaultInt64(c.ExpiresIn, 7200),
-		"refresh_refreshed_at": time.Now().Unix(),
+		"openid":                    c.OpenID,
+		"accesstoken":               c.AccessToken,
+		"refreshtoken":              c.RefreshToken,
+		"refresh_token_observed_at": c.RefreshTokenObservedAt,
+		"logintype":                 defaultString(c.LoginType, "WX"),
+		"nickname":                  c.Nickname,
+		"expires_at":                c.ExpiresAt,
+		"expires_in":                defaultInt64(c.ExpiresIn, 7200),
+		"refresh_refreshed_at":      time.Now().Unix(),
 	}
 }
 
@@ -73,8 +98,15 @@ type LoginBufferClient struct {
 }
 
 func NewLoginBufferClient(timeout time.Duration) *LoginBufferClient {
+	return NewLoginBufferClientWithHTTPClient(&http.Client{Timeout: timeout}, timeout)
+}
+
+func NewLoginBufferClientWithHTTPClient(httpClient *http.Client, timeout time.Duration) *LoginBufferClient {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: timeout}
+	}
 	return &LoginBufferClient{
-		httpClient: &http.Client{Timeout: timeout},
+		httpClient: httpClient,
 		timeout:    timeout,
 	}
 }
@@ -117,7 +149,7 @@ func (c *LoginBufferClient) FetchLoginBuffer(ctx context.Context, creds LoginBuf
 
 func (c *LoginBufferClient) RefreshCredentials(ctx context.Context, creds LoginBufferCredentials) (LoginBufferCredentials, error) {
 	if creds.RefreshToken == "" {
-		return LoginBufferCredentials{}, fmt.Errorf("missing refresh token")
+		return LoginBufferCredentials{}, ErrMissingRefreshToken
 	}
 	body, err := json.Marshal(refreshTokenRequest{UserInfo: refreshTokenUserInfo{
 		OpenID:       creds.OpenID,
@@ -139,15 +171,19 @@ func (c *LoginBufferClient) RefreshCredentials(ctx context.Context, creds LoginB
 	}, &data); err != nil {
 		return LoginBufferCredentials{}, err
 	}
-	if intFromAny(data["code"]) != 0 {
-		return LoginBufferCredentials{}, fmt.Errorf("refresh failed: code=%v msg=%v", data["code"], data["msg"])
+	if code := intFromAny(data["code"]); code != 0 {
+		return LoginBufferCredentials{}, &RefreshRejectedError{Code: code, Message: fmt.Sprint(data["msg"])}
 	}
 	info, _ := data["user_info"].(map[string]any)
 	expiresIn := defaultInt64(int64FromMap(info, "expires_in"), 7200)
 	refreshed := creds
+	if refreshed.RefreshToken != "" && refreshed.RefreshTokenObservedAt <= 0 {
+		refreshed.RefreshTokenObservedAt = time.Now().Unix()
+	}
 	refreshed.AccessToken = stringFromMap(info, "access_token")
-	if rt := stringFromMap(info, "refresh_token"); rt != "" {
+	if rt := stringFromMap(info, "refresh_token"); rt != "" && rt != refreshed.RefreshToken {
 		refreshed.RefreshToken = rt
+		refreshed.RefreshTokenObservedAt = time.Now().Unix()
 	}
 	refreshed.ExpiresIn = expiresIn
 	refreshed.ExpiresAt = time.Now().Unix() + expiresIn

@@ -1,0 +1,4 @@
+FROM python:3.11-alpine
+COPY wx-proxy/wx-proxy.py /app/wx-proxy.py
+WORKDIR /app
+CMD ["python3", "wx-proxy.py"]

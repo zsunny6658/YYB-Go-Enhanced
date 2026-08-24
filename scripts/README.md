@@ -1,0 +1,29 @@
+# 青龙修复脚本
+
+这个目录收录了对 `SuperNaiBA/YYB-GO-Script` 中已确认报错脚本的最小修复版，用于 YYB Go 多账号调用。
+
+## 已修复
+
+- `DDYX.py`、`DSMMHYSCQD.py`、`DSTX.py`、`DTSH.py`、`JTC.py`、`JYXEJYFHS.py`、`LDXQ.py`、`NWDJG.py`、`NXDC.py`、`QC.py`、`SANF.py`、`THYC.py`、`XFJ.py`、`byd_sign.py`：修复 `YYB_SERVER` 配置提示代码的缩进错误。
+- `WRN.py`：补充实际运行所需的 `sys` 导入。
+- `MS.js`：兼容会员信息的新旧返回结构，缺少 `memberId` 时停止当前账号，避免连续异常。
+- `jyk.py`：正确解析 `地址@账号标识` 格式，避免把账号 ID 当作 YYB 服务地址。
+- `TCLXLC.js`：移除登录流程中对未定义 `parsedServer` 变量的引用。
+
+## YYB 活动脚本
+
+- `weile_coin.py`：通过 `YYB_SERVER` 动态获取微信小游戏 code，支持多账号查询微乐每日任务，并领取 HAR 已验证的分享福利金币和订阅更新金币。默认每次运行最多领取 1 次分享福利；设置 `WEILE_DRY_RUN=1` 可只查询不领取。
+- `qq音乐_code版.py`：通过 `YYB_SERVER` 动态获取 QQ 音乐小程序 code，支持多账号执行，并从 YYB 账号资料中读取备注或昵称用于日志和通知显示；未配置 `YYB_SERVER` 时保留旧版多端口兼容模式。
+- `小牛电动.py`、`东风奕派签到.py`、`叮咚买菜_code版.py`、`pp停车任务_cod.py`：支持 `YYB_SERVER` 多账号动态 code，并在日志和通知中优先显示 YYB 备注或昵称；未配置时继续兼容各脚本原有 code 服务地址。
+- `无忧计划.py`：收录独立账号密码版任务脚本，继续使用 `WY_ACCOUNT=账号#密码#device_id#备注`，不依赖 YYB 微信账号。
+
+## 使用
+
+将需要的文件覆盖到青龙订阅目录中对应的脚本，然后先做语法检查：
+
+```bash
+python3 -m py_compile /ql/data/scripts/SuperNaiBA_YYB-GO-Script/脚本名.py
+node --check /ql/data/scripts/SuperNaiBA_YYB-GO-Script/脚本名.js
+```
+
+重新执行上游订阅可能会覆盖这些修复，建议在订阅更新后重新检查。脚本仍受原项目授权和条款约束。

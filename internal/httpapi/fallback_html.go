@@ -62,6 +62,10 @@ async function poll(){
 newQR();
 </script></body></html>`
 
+const fallbackProxiesHTML = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>代理设置 - YYB Go</title><body style="font-family:system-ui,sans-serif;margin:40px"><main><h1>代理设置</h1>
+<p>资源模板未找到，请检查容器内的 <code>/app/resource/templates/proxies.html</code>。</p><p><a href="/">返回工作台</a></p></main></body></html>`
+
 const fallbackRunsHTML = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>账号运行管理</title><body style="font-family:system-ui,sans-serif;margin:40px"><h1>账号运行管理</h1>
 <p>资源模板未找到，请检查容器内的 <code>/app/resource/templates/runs.html</code>。</p><p><a href="/">返回账号控制台</a></p></body></html>`
@@ -75,3 +79,8 @@ const docsHTML = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta 
 </body></html>`
 
 var openAPISpec = newOpenAPISpec()
+
+const fallbackLoginHTML = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>登录 - YYB Go</title><body><main><h1>YYB Go 登录</h1><p>资源模板未找到，请检查 <code>resource/templates/login.html</code>。</p></main></body></html>`
+const fallbackRegisterHTML = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>注册 - YYB Go</title><body><main><h1>YYB Go 注册</h1><p>资源模板未找到，请检查 <code>resource/templates/register.html</code>。</p></main></body></html>`
+const fallbackSettingsHTML = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>个人设置 - YYB Go</title><body><main><h1>个人设置</h1><p>资源模板未找到。</p></main></body></html>`
+const fallbackUsersHTML = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>用户管理 - YYB Go</title><body><main><h1>用户管理</h1><p>资源模板未找到。</p></main></body></html>`

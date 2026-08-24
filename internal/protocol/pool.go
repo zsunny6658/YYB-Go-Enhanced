@@ -20,8 +20,6 @@ type Config struct {
 	DNSCacheTTL             time.Duration
 	MaxShortlinkConcurrency int
 	MaxLoginConcurrency     int
-	TCPProxy                string
-	TCPProxyFallbackDirect  bool
 }
 
 func DefaultConfig() Config {
@@ -32,7 +30,6 @@ func DefaultConfig() Config {
 		DNSCacheTTL:             30 * time.Minute,
 		MaxShortlinkConcurrency: 1000,
 		MaxLoginConcurrency:     32,
-		TCPProxyFallbackDirect:  true,
 	}
 }
 
@@ -42,6 +39,7 @@ type WmpfSession struct {
 	ShortlinkTargets []Target
 	CreatedAt        time.Time
 	TCPProxy         string
+	FallbackDirect   bool
 }
 
 type Pool struct {
@@ -84,8 +82,8 @@ func NewPool(cfg Config, db *store.DB) *Pool {
 	}
 }
 
-func (p *Pool) GetCode(ctx context.Context, loginBuffer, appID string, accountID int64, tcpProxy string) (map[string]any, error) {
-	return p.run(ctx, loginBuffer, accountID, tcpProxy, func(ctx context.Context, st WmpfSession) (map[string]any, error) {
+func (p *Pool) GetCode(ctx context.Context, loginBuffer, appID string, accountID int64, tcpProxy string, fallbackDirect bool) (map[string]any, error) {
+	call := func(ctx context.Context, st WmpfSession) (map[string]any, error) {
 		hostAppID := st.Session.HostAppID
 		if len(hostAppID) == 0 {
 			hostAppID = hostAppIDDefault
@@ -99,17 +97,18 @@ func (p *Pool) GetCode(ctx context.Context, loginBuffer, appID string, accountID
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{
-			"code":    string(code),
-			"codeLen": len(code),
-			"respHex": hex.EncodeToString(resp),
-			"errMsg":  "login:ok",
-		}, nil
-	})
+		return map[string]any{"code": string(code), "errMsg": "login:ok"}, nil
+	}
+	result, err := p.run(ctx, loginBuffer, accountID, tcpProxy, fallbackDirect, call)
+	if err != nil || result["code"] != "" {
+		return result, err
+	}
+	_ = p.Invalidate(ctx, accountID, tcpProxy)
+	return p.run(ctx, loginBuffer, accountID, tcpProxy, fallbackDirect, call)
 }
 
-func (p *Pool) GetPhoneNumber(ctx context.Context, loginBuffer, appID string, accountID int64, tcpProxy string) (map[string]any, error) {
-	return p.run(ctx, loginBuffer, accountID, tcpProxy, func(ctx context.Context, st WmpfSession) (map[string]any, error) {
+func (p *Pool) GetPhoneNumber(ctx context.Context, loginBuffer, appID string, accountID int64, tcpProxy string, fallbackDirect bool) (map[string]any, error) {
+	return p.run(ctx, loginBuffer, accountID, tcpProxy, fallbackDirect, func(ctx context.Context, st WmpfSession) (map[string]any, error) {
 		plain := buildPhoneRequest(st.Session.UIN, appID)
 		envelope, err := buildTransferPacket(st.Session, plain)
 		if err != nil {
@@ -123,8 +122,8 @@ func (p *Pool) GetPhoneNumber(ctx context.Context, loginBuffer, appID string, ac
 	})
 }
 
-func (p *Pool) OperateWXData(ctx context.Context, loginBuffer, appID string, payload map[string]any, accountID int64, tcpProxy string) (map[string]any, error) {
-	return p.run(ctx, loginBuffer, accountID, tcpProxy, func(ctx context.Context, st WmpfSession) (map[string]any, error) {
+func (p *Pool) OperateWXData(ctx context.Context, loginBuffer, appID string, payload map[string]any, accountID int64, tcpProxy string, fallbackDirect bool) (map[string]any, error) {
+	return p.run(ctx, loginBuffer, accountID, tcpProxy, fallbackDirect, func(ctx context.Context, st WmpfSession) (map[string]any, error) {
 		plain, err := buildOperateRequest(st.Session.UIN, appID, payload)
 		if err != nil {
 			return nil, err
@@ -142,21 +141,21 @@ func (p *Pool) OperateWXData(ctx context.Context, loginBuffer, appID string, pay
 }
 
 func (p *Pool) Invalidate(ctx context.Context, accountID int64, tcpProxy string) error {
-	return p.db.InvalidateSession(ctx, accountID, effectiveProxy(tcpProxy, p.cfg.TCPProxy))
+	return p.db.InvalidateSession(ctx, accountID, tcpProxy)
 }
 
-func (p *Pool) run(ctx context.Context, loginBuffer string, accountID int64, tcpProxy string, op func(context.Context, WmpfSession) (map[string]any, error)) (map[string]any, error) {
-	effective := effectiveProxy(tcpProxy, p.cfg.TCPProxy)
-	st, err := p.state(ctx, loginBuffer, accountID, effective)
+func (p *Pool) run(ctx context.Context, loginBuffer string, accountID int64, tcpProxy string, fallbackDirect bool, op func(context.Context, WmpfSession) (map[string]any, error)) (map[string]any, error) {
+	st, err := p.state(ctx, loginBuffer, accountID, tcpProxy, fallbackDirect)
 	if err == nil {
+		st.FallbackDirect = fallbackDirect
 		res, err := op(ctx, st)
-		if err == nil || effective == "" || !p.cfg.TCPProxyFallbackDirect {
+		if err == nil || tcpProxy == "" || !fallbackDirect {
 			return res, err
 		}
-		_ = p.Invalidate(ctx, accountID, effective)
+		_ = p.Invalidate(ctx, accountID, tcpProxy)
 	}
-	if effective != "" && p.cfg.TCPProxyFallbackDirect {
-		st, err = p.state(ctx, loginBuffer, accountID, "")
+	if tcpProxy != "" && fallbackDirect {
+		st, err = p.state(ctx, loginBuffer, accountID, "", false)
 		if err != nil {
 			return nil, err
 		}
@@ -165,7 +164,7 @@ func (p *Pool) run(ctx context.Context, loginBuffer string, accountID int64, tcp
 	return nil, err
 }
 
-func (p *Pool) state(ctx context.Context, loginBuffer string, accountID int64, tcpProxy string) (WmpfSession, error) {
+func (p *Pool) state(ctx context.Context, loginBuffer string, accountID int64, tcpProxy string, fallbackDirect bool) (WmpfSession, error) {
 	if row, err := p.db.GetSession(ctx, accountID, tcpProxy); err == nil {
 		return sessionFromBlob(row.SessionBlob)
 	} else if !errors.Is(err, sql.ErrNoRows) {
@@ -189,7 +188,7 @@ func (p *Pool) state(ctx context.Context, loginBuffer string, accountID int64, t
 	defer release(p.loginSem)
 	loginCtx, cancel := context.WithTimeout(ctx, p.cfg.LoginTimeout)
 	defer cancel()
-	st, err := p.loginAndSession(loginCtx, loginBuffer, tcpProxy)
+	st, err := p.loginAndSession(loginCtx, loginBuffer, tcpProxy, fallbackDirect)
 	if err != nil {
 		return WmpfSession{}, err
 	}
@@ -214,7 +213,7 @@ func (p *Pool) lockFor(key string) *sync.Mutex {
 	return l
 }
 
-func (p *Pool) loginAndSession(ctx context.Context, loginBuffer, tcpProxy string) (WmpfSession, error) {
+func (p *Pool) loginAndSession(ctx context.Context, loginBuffer, tcpProxy string, fallbackDirect bool) (WmpfSession, error) {
 	if loginBuffer == "" {
 		return WmpfSession{}, fmt.Errorf("login_buffer is empty")
 	}
@@ -225,7 +224,7 @@ func (p *Pool) loginAndSession(ctx context.Context, loginBuffer, tcpProxy string
 	targets = orderLonglinkTargets(targets, 6)
 	var last error
 	for _, t := range targets {
-		mc, err := connectMmtls(ctx, t, p.cfg.LoginTimeout, tcpProxy, p.cfg.TCPProxyFallbackDirect)
+		mc, err := connectMmtls(ctx, t, p.cfg.LoginTimeout, tcpProxy, fallbackDirect)
 		if err != nil {
 			last = err
 			continue
@@ -286,6 +285,7 @@ func (p *Pool) loginAndSession(ctx context.Context, loginBuffer, tcpProxy string
 			ShortlinkTargets: shortTargets,
 			CreatedAt:        time.Now(),
 			TCPProxy:         tcpProxy,
+			FallbackDirect:   fallbackDirect,
 		}, nil
 	}
 	if last == nil {
@@ -301,11 +301,7 @@ func (p *Pool) sendEnvelope(ctx context.Context, st WmpfSession, envelope []byte
 	defer release(p.shortlinkSem)
 	reqCtx, cancel := context.WithTimeout(ctx, p.cfg.ShortlinkTimeout)
 	defer cancel()
-	fallback := p.cfg.TCPProxyFallbackDirect
-	if st.TCPProxy != "" {
-		fallback = false
-	}
-	return send0RTT(reqCtx, st.ShortlinkTargets, st.PSK, st.Session.RecvKey, envelope, p.cfg.ShortlinkTimeout, st.TCPProxy, fallback)
+	return send0RTT(reqCtx, st.ShortlinkTargets, st.PSK, st.Session.RecvKey, envelope, p.cfg.ShortlinkTimeout, st.TCPProxy, st.FallbackDirect)
 }
 
 func acquire(ctx context.Context, sem chan struct{}) error {
@@ -322,13 +318,6 @@ func release(sem chan struct{}) {
 	case <-sem:
 	default:
 	}
-}
-
-func effectiveProxy(req, def string) string {
-	if req != "" {
-		return req
-	}
-	return def
 }
 
 func sessionExpiresAt(st WmpfSession, ttl time.Duration) int64 {

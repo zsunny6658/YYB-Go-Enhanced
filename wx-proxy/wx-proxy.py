@@ -35,7 +35,11 @@ AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "aa06c54e82f5439dc025e5f223b6466f")
 
 
 def call_yyb(openid, appid):
-    """转发到 YYB /wxapp/getCode，返回 code 字符串或 None"""
+    """转发到 YYB /wxapp/getCode，返回 code 字符串或 None。
+
+    YYB 返回格式：
+    {"code":0,"msg":"success","data":{"openid":"xxx","result":{"code":"wxCode...","errMsg":"..."}}}
+    """
     body = json.dumps({"ref": openid, "app_id": appid}).encode("utf-8")
     req = urllib.request.Request(
         f"{YYB_URL}/wxapp/getCode",
@@ -45,19 +49,24 @@ def call_yyb(openid, appid):
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            resp_json = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         return None, f"HTTP {e.code}: {e.read().decode('utf-8', errors='replace')}"
     except Exception as e:
         return None, f"request error: {e}"
 
-    code = (
-        data.get("data")
-        or {}
-    )
-    if isinstance(code, dict):
-        code = (code.get("result") or {}).get("code", "")
-    return (code, data.get("msg", "")) if code else (None, data.get("msg", ""))
+    # YYB 顶层 code=0 表示调用成功
+    if resp_json.get("code", -1) != 0:
+        return None, f"YYB returned code={resp_json.get('code')}: {resp_json.get('msg', '')}"
+
+    result = (resp_json.get("data") or {}).get("result") or {}
+    code = result.get("code", "")
+    err_msg = result.get("errMsg", "")
+
+    # code 可能为空(已有会话)，只要 YYB 返回 code=0 即成功
+    if code or err_msg.startswith("login:"):
+        return (code, err_msg or resp_json.get("msg", ""))
+    return (None, f"YYB {resp_json.get('msg', '')}")
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -74,11 +83,44 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _forward_post_yyb(self, path, body):
+        """把 POST body 原样透传到 YYB 对应路径，返回原始响应。"""
+        req = urllib.request.Request(
+            f"{YYB_URL}{path}",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = resp.read().decode("utf-8")
+                try:
+                    parsed = json.loads(raw)
+                except Exception:
+                    parsed = raw
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.wfile.write(json.dumps({"status": True, "data": parsed}, ensure_ascii=False).encode("utf-8"))
+        except urllib.error.HTTPError as e:
+            raw = e.read().decode("utf-8", errors="replace")
+            self._send_json(502, {"status": False, "message": f"YYB {e.code}: {raw}"})
+        except Exception as e:
+            self._send_json(502, {"status": False, "message": f"request error: {e}"})
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length) if length > 0 else b""
 
         path = self.path.rstrip("/")
+
+        # /wx/getphonenumber — 兼容 colorful.js 调用路径（脚本硬编码 /wx/getphonenumber）
+        # 转发到 YYB /wxapp/getPhoneNumber
+        if path == "/wx/getphonenumber":
+            return self._forward_post_yyb("/wxapp/getPhoneNumber", body)
+
+        # /wxapp/getPhoneNumber — YYB 原生接口
+        if path == "/wxapp/getPhoneNumber":
+            return self._forward_post_yyb(path, body)
 
         # /wx/code — 核心兼容接口
         if path == "/wx/code":
@@ -95,8 +137,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
 
             code, err = call_yyb(openid, appid)
-            if code:
-                self._send_json(200, {"status": True, "message": "获取成功", "data": {"code": code}})
+            # YYB code 可能为空(已有会话)但 errMsg=login:ok 表示成功
+            if code or (err and err.startswith("login:")):
+                self._send_json(200, {"status": True, "message": "获取成功", "data": {"code": code or ""}})
             else:
                 self._send_json(502, {"status": False, "message": f"获取 code 失败: {err}"})
             return
@@ -113,8 +156,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json(400, {"status": False, "message": "openid and appid required"})
                 return
             code, err = call_yyb(openid, appid)
-            if code:
-                self._send_json(200, {"status": True, "data": {"code": code, "encryptedData": "placeholder", "iv": "placeholder"}})
+            if code or (err and err.startswith("login:")):
+                self._send_json(200, {"status": True, "data": {"code": code or "", "encryptedData": "placeholder", "iv": "placeholder"}})
             else:
                 self._send_json(502, {"status": False, "message": f"获取 code 失败: {err}"})
             return

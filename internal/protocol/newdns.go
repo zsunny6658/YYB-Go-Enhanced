@@ -206,10 +206,15 @@ func serversFor(parsed map[string]dnsDomain, domain, proto string) []Target {
 
 func getLonglinkTargets(ctx context.Context, timeout, cacheTTL time.Duration) ([]Target, error) {
 	parsed, err := getDNSParsed(ctx, timeout, cacheTTL, false)
-	if err != nil {
-		return nil, err
+	if err == nil {
+		if targets := serversFor(parsed, longlinkDomain, protoMMTLS); len(targets) > 0 {
+			return targets, nil
+		}
 	}
-	return serversFor(parsed, longlinkDomain, protoMMTLS), nil
+	// Some networks block or return an empty response from WeChat HTTPDNS while
+	// normal DNS and the LongLink 443 port remain reachable. Let net.Dialer (or the
+	// configured TCP proxy) resolve the official hostname in that case.
+	return []Target{{IP: longlinkDomain, Port: 443}}, nil
 }
 
 func getShortlinkTargets(ctx context.Context, timeout, cacheTTL time.Duration) []Target {

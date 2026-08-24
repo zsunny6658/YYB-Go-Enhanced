@@ -23,6 +23,7 @@ type scriptSource struct {
 	Key      string
 	Name     string
 	Schedule string
+	TaskRoot string
 	Cron     qingLongCron
 }
 
@@ -131,8 +132,8 @@ func (a *App) handleQingLongJobs(w http.ResponseWriter, r *http.Request) {
 				item.Enabled = cron.enabled()
 				item.Running = cron.running()
 				item.QLCronID = cron.ID
-				item.LastExecutionAt = cron.LastExecutionTime
-				item.LastRunningTime = cron.LastRunningTime
+				item.LastExecutionAt = cron.getLastExecutionAt()
+				item.LastRunningTime = cron.getLastRunningTime()
 			}
 		}
 		out = append(out, item)
@@ -283,12 +284,27 @@ func (a *App) handleQingLongRunLog(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "该日志不属于当前账号或已被清理")
 		return
 	}
+	latest := true
+	for i := range runs {
+		if runs[i].QLCronID == selected.QLCronID && runs[i].StartedAt > selected.StartedAt {
+			latest = false
+			break
+		}
+	}
 	separator := strings.LastIndex(logKey, "/")
 	if separator <= 0 || separator == len(logKey)-1 {
 		writeError(w, http.StatusBadRequest, "日志路径不合法")
 		return
 	}
+	// The log key already identifies the file. This is especially important for
+	// Arcadia: CronLog would first list all tasks and directories again, which
+	// can exceed a reverse proxy timeout before the browser receives JSON.
 	logText, err := a.qinglong.logDetail(r.Context(), logKey[:separator], logKey[separator+1:])
+	if err != nil && latest && a.qinglong.getPanelType() != PanelTypeArcadia {
+		// QingLong installations differ in which file-detail permission and route
+		// they expose. Keep its task-log fallback for the latest run only.
+		logText, err = a.qinglong.cronLog(r.Context(), selected.QLCronID)
+	}
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
@@ -418,28 +434,39 @@ func (a *App) handleQingLongPush(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) scriptCatalog(ctx context.Context) ([]scriptSource, map[int64]qingLongCron, error) {
 	if !a.qinglong.configured() {
-		return nil, nil, fmt.Errorf("青龙 OpenAPI 未配置")
+		return nil, nil, fmt.Errorf("面板 OpenAPI 未配置")
 	}
-	crons, err := a.qinglong.listCrons(ctx, a.cfg.QingLongRepo)
+	repos, err := qingLongRepoRoots(a.cfg.QingLongRepo)
 	if err != nil {
 		return nil, nil, err
 	}
-	prefix := "task " + a.cfg.QingLongRepo + "/"
 	byKey := make(map[string]scriptSource)
-	byID := make(map[int64]qingLongCron, len(crons))
+	byID := make(map[int64]qingLongCron)
+
+	var crons []qingLongCron
+	for _, repo := range repos {
+		list, err := a.qinglong.listCrons(ctx, repo)
+		if err == nil && len(list) > 0 {
+			crons = append(crons, list...)
+		}
+	}
+	if len(crons) == 0 {
+		list, err := a.qinglong.listCrons(ctx, "")
+		if err != nil {
+			return nil, nil, err
+		}
+		crons = list
+	}
+
 	for _, cron := range crons {
 		byID[cron.ID] = cron
-		if strings.HasPrefix(cron.Name, "[YYB:") {
+		key, repo, ok := parseScriptKeyFromCron(cron, repos)
+		if !ok {
 			continue
 		}
-		if !strings.HasPrefix(cron.Command, prefix) {
-			continue
+		if _, exists := byKey[key]; !exists {
+			byKey[key] = scriptSource{Key: key, Name: cron.Name, Schedule: cron.getSchedule(), TaskRoot: repo, Cron: cron}
 		}
-		key := strings.TrimSpace(strings.TrimPrefix(cron.Command, prefix))
-		if !validScriptKey.MatchString(key) || key == "eoos/eoos_checkin.py" || key == "SendNotify.py" {
-			continue
-		}
-		byKey[key] = scriptSource{Key: key, Name: cron.Name, Schedule: cron.Schedule, Cron: cron}
 	}
 	out := make([]scriptSource, 0, len(byKey))
 	for _, source := range byKey {
@@ -449,6 +476,40 @@ func (a *App) scriptCatalog(ctx context.Context) ([]scriptSource, map[int64]qing
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
 	return out, byID, nil
+}
+
+func parseScriptKeyFromCron(cron qingLongCron, repos []string) (string, string, bool) {
+	if strings.HasPrefix(cron.Name, "[YYB:") {
+		return "", "", false
+	}
+	cmd := strings.TrimSpace(cron.Command)
+	for _, p := range []string{"arcadia run ", "task ", "node ", "python3 ", "python "} {
+		if strings.HasPrefix(cmd, p) {
+			cmd = strings.TrimSpace(strings.TrimPrefix(cmd, p))
+		}
+	}
+	for _, repo := range repos {
+		cleanRepo := strings.Trim(strings.TrimSpace(repo), "/")
+		prefix := cleanRepo + "/"
+		if strings.HasPrefix(cmd, prefix) {
+			key := strings.TrimSpace(strings.TrimPrefix(cmd, prefix))
+			if validScriptKey.MatchString(key) && !isIgnoredScriptKey(key) {
+				return key, cleanRepo, true
+			}
+		}
+		if idx := strings.Index(cmd, "/"+cleanRepo+"/"); idx != -1 {
+			key := strings.TrimSpace(cmd[idx+len("/"+cleanRepo+"/"):])
+			if validScriptKey.MatchString(key) && !isIgnoredScriptKey(key) {
+				return key, cleanRepo, true
+			}
+		}
+	}
+	return "", "", false
+}
+
+func isIgnoredScriptKey(key string) bool {
+	key = strings.TrimSpace(key)
+	return key == "SendNotify.py" || strings.Contains(key, "eoos_checkin.py")
 }
 
 func (a *App) ensureAccountJob(ctx context.Context, acc *store.WechatAccount, scriptKey string) (*store.AccountScriptJob, scriptSource, error) {
@@ -472,11 +533,11 @@ func (a *App) ensureAccountJob(ctx context.Context, acc *store.WechatAccount, sc
 	if err != nil {
 		return nil, scriptSource{}, err
 	}
-	command, taskBefore, err := a.accountTaskSpec(acc.ID, scriptKey, setting)
+	command, taskBefore, err := a.accountTaskSpec(acc.ID, source.TaskRoot, scriptKey, setting)
 	if err != nil {
 		return nil, scriptSource{}, err
 	}
-	name := managedTaskName(acc.ID, source.Name)
+	name := managedTaskName(acc, source.Name)
 	logName := managedLogName(acc.ID, scriptKey)
 	job, err := a.db.GetAccountScriptJob(ctx, acc.ID, scriptKey)
 	if err == nil {
@@ -490,6 +551,19 @@ func (a *App) ensureAccountJob(ctx context.Context, acc *store.WechatAccount, sc
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return nil, scriptSource{}, err
 	}
+
+	// A YYB reinstall can remove the local account_script_jobs row while the
+	// managed cron remains in QingLong. Reuse that cron instead of trying to
+	// create a duplicate (QingLong rejects duplicate command/schedule pairs).
+	if crons, scanErr := a.qinglong.listCrons(ctx, ""); scanErr == nil {
+		if existing, ok := findManagedAccountCron(crons, acc.ID, scriptKey, command); ok {
+			if err := a.qinglong.updateCron(ctx, existing.ID, name, command, source.Schedule, taskBefore, logName); err != nil {
+				return nil, scriptSource{}, err
+			}
+			job, err := a.db.UpsertAccountScriptJob(ctx, acc.ID, scriptKey, existing.ID, source.Schedule)
+			return job, source, err
+		}
+	}
 	cron, err := a.qinglong.createCron(ctx, name, command, source.Schedule, taskBefore, logName)
 	if err != nil {
 		return nil, scriptSource{}, err
@@ -501,8 +575,41 @@ func (a *App) ensureAccountJob(ctx context.Context, acc *store.WechatAccount, sc
 	return job, source, err
 }
 
-func managedTaskName(accountID int64, sourceName string) string {
-	return fmt.Sprintf("[YYB:%d] %s", accountID, sourceName)
+// findManagedAccountCron locates a cron created for this account and script.
+// The account marker is required so a normal, shared QingLong task can never
+// be adopted merely because it happens to use the same script.
+func findManagedAccountCron(crons []qingLongCron, accountID int64, scriptKey, expectedCommand string) (qingLongCron, bool) {
+	prefix := fmt.Sprintf("[YYB:%d]", accountID)
+	expected := normalizeCronCommand(expectedCommand)
+	for _, cron := range crons {
+		if !strings.HasPrefix(strings.TrimSpace(cron.Name), prefix) {
+			continue
+		}
+		actual := normalizeCronCommand(cron.Command)
+		if actual == expected || strings.HasSuffix(actual, "/"+strings.TrimSpace(scriptKey)) {
+			return cron, true
+		}
+	}
+	return qingLongCron{}, false
+}
+
+func normalizeCronCommand(command string) string {
+	command = strings.TrimSpace(command)
+	for _, prefix := range []string{"arcadia run ", "task ", "node ", "python3 ", "python "} {
+		if strings.HasPrefix(command, prefix) {
+			command = strings.TrimSpace(strings.TrimPrefix(command, prefix))
+			break
+		}
+	}
+	return command
+}
+
+func managedTaskName(acc *store.WechatAccount, sourceName string) string {
+	prefix := fmt.Sprintf("[YYB:%d]", acc.ID)
+	if acc.Remark != nil && strings.TrimSpace(*acc.Remark) != "" {
+		return fmt.Sprintf("%s %s · %s", prefix, strings.TrimSpace(*acc.Remark), sourceName)
+	}
+	return prefix + " " + sourceName
 }
 
 func managedLogName(accountID int64, scriptKey string) string {
@@ -510,14 +617,14 @@ func managedLogName(accountID int64, scriptKey string) string {
 	return fmt.Sprintf("yyb_account_%d_%x", accountID, sum[:6])
 }
 
-func (a *App) accountTaskSpec(accountID int64, scriptKey string, setting *store.AccountPushSetting) (string, string, error) {
+func (a *App) accountTaskSpec(accountID int64, taskRoot, scriptKey string, setting *store.AccountPushSetting) (string, string, error) {
 	if !validScriptKey.MatchString(scriptKey) {
 		return "", "", fmt.Errorf("脚本路径不合法")
 	}
 	if !regexp.MustCompile(`^[A-Za-z0-9_.:-]+$`).MatchString(a.cfg.QingLongServer) {
 		return "", "", fmt.Errorf("YYB_QINGLONG_SERVER 格式不合法")
 	}
-	if !regexp.MustCompile(`^[A-Za-z0-9_.-]+$`).MatchString(a.cfg.QingLongRepo) {
+	if !validQingLongTaskRoot(taskRoot) {
 		return "", "", fmt.Errorf("YYB_QINGLONG_REPO 格式不合法")
 	}
 	pushKey, pushPlusToken, pushPlusTopic, qywxKey := "''", "''", "''", "''"
@@ -532,12 +639,50 @@ func (a *App) accountTaskSpec(accountID int64, scriptKey string, setting *store.
 	case "qywx":
 		qywxKey = envReference(setting.TokenEnvName)
 	}
-	command := fmt.Sprintf("task %s/%s", a.cfg.QingLongRepo, scriptKey)
+	command := fmt.Sprintf("task %s/%s", taskRoot, scriptKey)
 	taskBefore := fmt.Sprintf(
 		"export YYB_SERVER='%s@%d'; export PUSH_KEY=%s; export PUSH_PLUS_TOKEN=%s; export PUSH_PLUS_USER=%s; export QYWX_KEY=%s",
 		a.cfg.QingLongServer, accountID, pushKey, pushPlusToken, pushPlusTopic, qywxKey,
 	)
 	return command, taskBefore, nil
+}
+
+func qingLongRepoRoots(raw string) ([]string, error) {
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r'
+	})
+	seen := make(map[string]struct{}, len(parts))
+	repos := make([]string, 0, len(parts))
+	for _, part := range parts {
+		repo := strings.Trim(strings.TrimSpace(part), "/")
+		if repo == "" {
+			continue
+		}
+		if !validQingLongTaskRoot(repo) {
+			return nil, fmt.Errorf("YYB_QINGLONG_REPO 格式不合法: %s", repo)
+		}
+		if _, exists := seen[repo]; exists {
+			continue
+		}
+		seen[repo] = struct{}{}
+		repos = append(repos, repo)
+	}
+	if len(repos) == 0 {
+		return nil, fmt.Errorf("YYB_QINGLONG_REPO 未配置")
+	}
+	return repos, nil
+}
+
+func validQingLongTaskRoot(root string) bool {
+	if !regexp.MustCompile(`^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$`).MatchString(root) {
+		return false
+	}
+	for _, segment := range strings.Split(root, "/") {
+		if segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func envReference(name string) string {
@@ -652,11 +797,11 @@ func (a *App) refreshAccountJobCommands(ctx context.Context, acc *store.WechatAc
 		if _, cronExists := cronsByID[job.QLCronID]; !sourceExists || !cronExists {
 			continue
 		}
-		command, taskBefore, err := a.accountTaskSpec(acc.ID, job.ScriptKey, setting)
+		command, taskBefore, err := a.accountTaskSpec(acc.ID, source.TaskRoot, job.ScriptKey, setting)
 		if err != nil {
 			return err
 		}
-		if err := a.qinglong.updateCron(ctx, job.QLCronID, managedTaskName(acc.ID, source.Name), command, source.Schedule, taskBefore, managedLogName(acc.ID, job.ScriptKey)); err != nil {
+		if err := a.qinglong.updateCron(ctx, job.QLCronID, managedTaskName(acc, source.Name), command, source.Schedule, taskBefore, managedLogName(acc.ID, job.ScriptKey)); err != nil {
 			return err
 		}
 	}

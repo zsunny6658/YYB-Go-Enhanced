@@ -4,11 +4,14 @@ go 1.23.0
 
 require (
 	github.com/gin-gonic/gin v1.10.1
+	github.com/go-sql-driver/mysql v1.9.3
 	github.com/swaggo/http-swagger/v2 v2.0.2
+	golang.org/x/crypto v0.39.0
 	modernc.org/sqlite v1.38.2
 )
 
 require (
+	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/KyleBanks/depth v1.2.1 // indirect
 	github.com/bytedance/sonic v1.11.6 // indirect
 	github.com/bytedance/sonic/loader v0.1.1 // indirect
@@ -45,7 +48,6 @@ require (
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.2.12 // indirect
 	golang.org/x/arch v0.8.0 // indirect
-	golang.org/x/crypto v0.39.0 // indirect
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
 	golang.org/x/net v0.41.0 // indirect
 	golang.org/x/sys v0.34.0 // indirect

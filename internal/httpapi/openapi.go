@@ -1,5 +1,15 @@
 package httpapi
 
+func wxAliasOperation(summary, requestSchema, responseSchema string) map[string]any {
+	return map[string]any{
+		"post": openAPIOperation(
+			[]string{"wx"}, summary, nil,
+			jsonRequestBody(refSchema(requestSchema)),
+			defaulted(map[string]any{"200": jsonResponse(summary+"。", refSchema(responseSchema))}),
+		),
+	}
+}
+
 func newOpenAPISpec() map[string]any {
 	return map[string]any{
 		"openapi": "3.0.3",
@@ -14,9 +24,13 @@ func newOpenAPISpec() map[string]any {
 		"tags": []map[string]any{
 			{"name": "health", "description": "服务健康检查"},
 			{"name": "qr", "description": "微信扫码登录"},
+			{"name": "quick-login", "description": "桌面微信快速授权"},
 			{"name": "accounts", "description": "已保存的微信账号"},
-			{"name": "qinglong", "description": "账号级青龙任务与推送管理"},
+			{"name": "proxy-profiles", "description": "可复用的品赞代理配置与地区"},
+			{"name": "qinglong", "description": "账号级自动化面板任务与推送管理（兼容青龙、呆呆和 Arcadia）"},
 			{"name": "wxapp", "description": "wxapp 业务接口调用"},
+			{"name": "wx", "description": "兼容 /wx/* 的微信业务接口"},
+			{"name": "oauth", "description": "微信公众号网页授权链接"},
 		},
 		"paths": map[string]any{
 			"/health": map[string]any{
@@ -37,7 +51,7 @@ func newOpenAPISpec() map[string]any {
 					[]map[string]any{
 						boolQueryParam("as_base64", "是否同时返回二维码图片的 data URI。"),
 					},
-					nil,
+					jsonOptionalRequestBody(refSchema("ProxySpec")),
 					defaulted(map[string]any{
 						"200": jsonResponse("二维码会话创建成功。", refSchema("QRCreateResponse")),
 					}),
@@ -71,6 +85,28 @@ func newOpenAPISpec() map[string]any {
 					"确认已授权的扫码会话并保存账号",
 					[]map[string]any{pathStringParam("session_id", "二维码会话 ID。")},
 					nil,
+					defaulted(map[string]any{
+						"200": jsonResponse("已保存的账号信息。", refSchema("AccountPublic")),
+					}),
+				),
+			},
+			"/quick-login": map[string]any{
+				"post": openAPIOperation(
+					[]string{"quick-login"},
+					"创建桌面微信快速授权会话",
+					nil,
+					jsonOptionalRequestBody(refSchema("ProxySpec")),
+					defaulted(map[string]any{
+						"200": jsonResponse("快速授权参数。", refSchema("QuickLoginCreateResponse")),
+					}),
+				),
+			},
+			"/quick-login/{session_id}/confirm": map[string]any{
+				"post": openAPIOperation(
+					[]string{"quick-login"},
+					"确认桌面微信授权并保存账号",
+					[]map[string]any{pathStringParam("session_id", "快速授权会话 ID。")},
+					jsonRequestBody(refSchema("QuickLoginConfirmRequest")),
 					defaulted(map[string]any{
 						"200": jsonResponse("已保存的账号信息。", refSchema("AccountPublic")),
 					}),
@@ -130,10 +166,85 @@ func newOpenAPISpec() map[string]any {
 					}),
 				),
 			},
+			"/accounts/remark": map[string]any{
+				"put": openAPIOperation(
+					[]string{"accounts"}, "保存账号备注", nil,
+					jsonRequestBody(refSchema("AccountRemarkRequest")),
+					defaulted(map[string]any{"200": jsonResponse("备注保存结果。", freeFormObjectSchema("账号及青龙任务名称更新状态。"))}),
+				),
+			},
+			"/accounts/proxy": map[string]any{
+				"get": openAPIOperation(
+					[]string{"accounts"}, "读取账号代理配置",
+					[]map[string]any{queryStringParam("ref", "账号 ID、UIN 或 openid。", true)}, nil,
+					defaulted(map[string]any{"200": jsonResponse("账号代理配置。", refSchema("AccountProxySetting"))}),
+				),
+				"put": openAPIOperation(
+					[]string{"accounts"}, "保存账号代理配置", nil,
+					jsonRequestBody(refSchema("AccountProxyRequest")),
+					defaulted(map[string]any{"200": jsonResponse("保存后的账号代理配置。", refSchema("AccountProxySetting"))}),
+				),
+			},
+			"/accounts/proxy/test": map[string]any{
+				"post": openAPIOperation(
+					[]string{"accounts"}, "提取并校验代理配置", nil,
+					jsonRequestBody(refSchema("AccountProxyTestRequest")),
+					defaulted(map[string]any{"200": jsonResponse("代理解析结果，不返回认证信息。", refSchema("AccountProxyTestResponse"))}),
+				),
+			},
+			"/api/proxy-profiles": map[string]any{
+				"get": openAPIOperation(
+					[]string{"proxy-profiles"}, "列出品赞代理配置", nil, nil,
+					defaulted(map[string]any{"200": jsonResponse("品赞代理配置列表。", arraySchema(refSchema("ProxyProviderProfile")))}),
+				),
+				"post": openAPIOperation(
+					[]string{"proxy-profiles"}, "添加品赞代理配置", nil,
+					jsonRequestBody(refSchema("ProxyProviderProfileRequest")),
+					defaulted(map[string]any{"201": jsonResponse("新建的品赞代理配置。", refSchema("ProxyProviderProfile"))}),
+				),
+			},
+			"/api/proxy-profiles/{id}": map[string]any{
+				"put": openAPIOperation(
+					[]string{"proxy-profiles"}, "更新品赞代理配置", []map[string]any{pathStringParam("id", "代理配置 ID。")},
+					jsonRequestBody(refSchema("ProxyProviderProfileRequest")),
+					defaulted(map[string]any{"200": jsonResponse("更新后的品赞代理配置。", refSchema("ProxyProviderProfile"))}),
+				),
+				"delete": openAPIOperation(
+					[]string{"proxy-profiles"}, "删除未被账号使用的品赞代理配置", []map[string]any{pathStringParam("id", "代理配置 ID。")}, nil,
+					defaulted(map[string]any{"200": jsonResponse("删除结果。", freeFormObjectSchema("已删除的配置 ID。"))}),
+				),
+			},
+			"/api/proxy-profiles/areas/provinces": map[string]any{
+				"get": openAPIOperation([]string{"proxy-profiles"}, "列出品赞支持的省份", nil, nil,
+					defaulted(map[string]any{"200": jsonResponse("省份列表。", arraySchema(refSchema("ProxyArea")))})),
+			},
+			"/api/proxy-profiles/areas/cities": map[string]any{
+				"get": openAPIOperation([]string{"proxy-profiles"}, "列出省份下的城市",
+					[]map[string]any{queryStringParam("province", "6 位省份编码。", true)}, nil,
+					defaulted(map[string]any{"200": jsonResponse("城市列表。", arraySchema(refSchema("ProxyArea")))})),
+			},
 			"/api/qinglong/status": map[string]any{
 				"get": openAPIOperation(
-					[]string{"qinglong"}, "检查青龙连接状态", nil, nil,
-					defaulted(map[string]any{"200": jsonResponse("青龙配置和连接状态。", refSchema("QingLongStatus"))}),
+					[]string{"qinglong"}, "检查自动化面板连接状态", nil, nil,
+					defaulted(map[string]any{"200": jsonResponse("面板配置和连接状态。", refSchema("QingLongStatus"))}),
+				),
+			},
+			"/api/qinglong/config": map[string]any{
+				"get": openAPIOperation(
+					[]string{"qinglong"}, "读取自动化面板连接配置", nil, nil,
+					defaulted(map[string]any{"200": jsonResponse("不包含 Client Secret 明文。", refSchema("QingLongConfig"))}),
+				),
+				"put": openAPIOperation(
+					[]string{"qinglong"}, "测试并保存自动化面板连接配置", nil,
+					jsonRequestBody(refSchema("QingLongConfigRequest")),
+					defaulted(map[string]any{"200": jsonResponse("连接测试及保存结果。", refSchema("QingLongConfig"))}),
+				),
+			},
+			"/api/qinglong/sync": map[string]any{
+				"post": openAPIOperation(
+					[]string{"qinglong"}, "将账号加入面板 YYB_SERVER", nil,
+					jsonRequestBody(refSchema("AccountRefRequest")),
+					defaulted(map[string]any{"200": jsonResponse("幂等同步结果。", refSchema("QingLongSyncResponse"))}),
 				),
 			},
 			"/api/qinglong/jobs": map[string]any{
@@ -196,6 +307,41 @@ func newOpenAPISpec() map[string]any {
 					defaulted(map[string]any{"200": jsonResponse("保存后的推送配置状态。", refSchema("PushSetting"))}),
 				),
 			},
+			"/wx/oauth": map[string]any{
+				"post": openAPIOperation(
+					[]string{"oauth"},
+					"生成微信公众号网页授权链接",
+					nil,
+					jsonRequestBody(objectSchema([]string{"ref", "appid", "redirect_uri"}, map[string]any{
+						"ref":             map[string]any{"type": "string"},
+						"appid":           map[string]any{"type": "string", "description": "18 位公众号 AppID"},
+						"redirect_uri":    map[string]any{"type": "string", "format": "uri"},
+						"scope":           map[string]any{"type": "string", "enum": []string{"snsapi_base", "snsapi_userinfo"}},
+						"state":           map[string]any{"type": "string"},
+						"component_appid": map[string]any{"type": "string"},
+					})),
+					defaulted(map[string]any{
+						"200": jsonResponse("生成授权链接；用户授权后 code 会回传到 redirect_uri。", freeFormObjectSchema("公众号网页授权结果")),
+					}),
+				),
+			},
+			"/wx/code": wxAliasOperation("获取小程序 code（兼容入口）", "WxappRequest", "WxappResponse"),
+			"/wx/getuserinfo": map[string]any{
+				"get": openAPIOperation([]string{"wx"}, "获取 YYB 账号用户信息", []map[string]any{queryStringParam("ref", "账号 ID、UIN 或 openid。", true)}, nil,
+					defaulted(map[string]any{"200": jsonResponse("用户信息。", freeFormObjectSchema("用户信息结果"))})),
+				"post": openAPIOperation([]string{"wx"}, "获取 YYB 账号用户信息", nil, jsonRequestBody(refSchema("AccountRefRequest")),
+					defaulted(map[string]any{"200": jsonResponse("用户信息。", freeFormObjectSchema("用户信息结果"))})),
+			},
+			"/wx/encryptkey":     wxAliasOperation("加密能力兼容转发（需要真实 payload）", "OperateWXDataRequest", "WxappResponse"),
+			"/wx/getphonenumber": wxAliasOperation("获取手机号（兼容入口）", "WxappRequest", "WxappResponse"),
+			"/wx/cloud":          wxAliasOperation("云函数/通用 operateWxData 兼容入口", "OperateWXDataRequest", "WxappResponse"),
+			"/wx/qrcodeauth": map[string]any{
+				"post": openAPIOperation([]string{"qr"}, "创建二维码授权会话", nil, jsonOptionalRequestBody(refSchema("ProxySpec")),
+					defaulted(map[string]any{"200": jsonResponse("二维码授权会话。", refSchema("QRCreateResponse"))})),
+			},
+			"/wx/mpgeta8key": wxAliasOperation("文章会话兼容入口", "OperateWXDataRequest", "WxappResponse"),
+			"/wx/appmsgext":  wxAliasOperation("文章扩展数据兼容入口", "OperateWXDataRequest", "WxappResponse"),
+			"/wx/appmsglike": wxAliasOperation("文章点赞兼容入口", "OperateWXDataRequest", "WxappResponse"),
 			"/wxapp/getCode": map[string]any{
 				"post": openAPIOperation(
 					[]string{"wxapp"},
@@ -206,6 +352,18 @@ func newOpenAPISpec() map[string]any {
 						"200": jsonResponse("getCode 调用结果。", refSchema("WxappResponse")),
 					}),
 				),
+			},
+			"/wx/qrcodeauth/{session_id}/image": map[string]any{
+				"get": openAPIOperation([]string{"qr"}, "获取兼容二维码图片", []map[string]any{pathStringParam("session_id", "二维码会话 ID。")}, nil,
+					defaulted(map[string]any{"200": imageResponse("二维码图片。")})),
+			},
+			"/wx/qrcodeauth/{session_id}/poll": map[string]any{
+				"get": openAPIOperation([]string{"qr"}, "轮询兼容二维码状态", []map[string]any{pathStringParam("session_id", "二维码会话 ID。")}, nil,
+					defaulted(map[string]any{"200": jsonResponse("扫码状态。", refSchema("QRPollResponse"))})),
+			},
+			"/wx/qrcodeauth/{session_id}/confirm": map[string]any{
+				"post": openAPIOperation([]string{"qr"}, "确认兼容二维码授权", []map[string]any{pathStringParam("session_id", "二维码会话 ID。")}, nil,
+					defaulted(map[string]any{"200": jsonResponse("已保存的账号。", refSchema("AccountPublic"))})),
 			},
 			"/wxapp/getPhoneNumber": map[string]any{
 				"post": openAPIOperation(
@@ -250,6 +408,7 @@ func newOpenAPISpec() map[string]any {
 					"status":       map[string]any{"type": "string", "example": "pending"},
 					"image_url":    map[string]any{"type": "string", "example": "/qr/{session_id}/image"},
 					"image_base64": nullableStringSchema("当 as_base64=true 时返回二维码图片 data URI。"),
+					"proxy":        map[string]any{"type": "string", "description": "本次授权会话使用的脱敏代理地址；直连时为空。"},
 				}),
 				"QRPollResponse": objectSchema([]string{"status"}, map[string]any{
 					"status": map[string]any{
@@ -258,31 +417,135 @@ func newOpenAPISpec() map[string]any {
 					},
 					"errcode": map[string]any{"type": "integer", "nullable": true},
 				}),
+				"QuickLoginCreateResponse": objectSchema([]string{"session_id", "appid", "scope", "redirect_uri", "state", "ports", "expires_in"}, map[string]any{
+					"session_id":   map[string]any{"type": "string"},
+					"appid":        map[string]any{"type": "string"},
+					"scope":        map[string]any{"type": "string"},
+					"redirect_uri": map[string]any{"type": "string", "format": "uri"},
+					"state":        map[string]any{"type": "string"},
+					"ports":        arraySchema(map[string]any{"type": "integer"}),
+					"expires_in":   map[string]any{"type": "integer", "format": "int64"},
+				}),
+				"QuickLoginConfirmRequest": objectSchema([]string{"redirect_url"}, map[string]any{
+					"redirect_url": map[string]any{"type": "string", "format": "uri"},
+				}),
 				"AccountPublic": objectSchema([]string{"id", "openid", "created_at", "updated_at"}, map[string]any{
+					"id":                        int64Schema(),
+					"openid":                    map[string]any{"type": "string"},
+					"uin":                       nullableInt64Schema(),
+					"alias":                     nullableStringSchema("账号别名。"),
+					"nickname":                  nullableStringSchema("账号昵称。"),
+					"remark":                    nullableStringSchema("用户设置的账号备注。"),
+					"avatar":                    nullableStringSchema("本地头像路径或远程头像 URL。"),
+					"status":                    nullableStringSchema("账号状态。"),
+					"refresh_token_observed_at": nullableInt64Schema(),
+					"rescan_recommended":        map[string]any{"type": "boolean", "description": "当前 refresh token 已连续使用约 25 天，建议重新扫码。"},
+					"last_checked_at":           nullableInt64Schema(),
+					"created_at":                int64Schema(),
+					"updated_at":                int64Schema(),
+				}),
+				"RefreshResult": objectSchema([]string{"id", "openid", "status", "rescan_required"}, map[string]any{
 					"id":              int64Schema(),
 					"openid":          map[string]any{"type": "string"},
 					"uin":             nullableInt64Schema(),
-					"alias":           nullableStringSchema("账号别名。"),
 					"nickname":        nullableStringSchema("账号昵称。"),
-					"avatar":          nullableStringSchema("本地头像路径或远程头像 URL。"),
-					"status":          nullableStringSchema("账号状态。"),
-					"last_checked_at": nullableInt64Schema(),
-					"created_at":      int64Schema(),
-					"updated_at":      int64Schema(),
+					"status":          map[string]any{"type": "string", "example": "alive"},
+					"rescan_required": map[string]any{"type": "boolean", "description": "仅在服务端明确判定登录凭证失效时为 true。"},
+					"refresh_error":   nullableStringSchema("本次刷新失败原因；临时网络错误不代表账号失效。"),
 				}),
-				"RefreshResult": objectSchema([]string{"id", "openid", "status"}, map[string]any{
-					"id":       int64Schema(),
-					"openid":   map[string]any{"type": "string"},
-					"uin":      nullableInt64Schema(),
-					"nickname": nullableStringSchema("账号昵称。"),
-					"status":   map[string]any{"type": "string", "example": "alive"},
-				}),
-				"DeleteAccountResponse": objectSchema([]string{"deleted", "openid"}, map[string]any{
-					"deleted": int64Schema(),
-					"openid":  map[string]any{"type": "string"},
+				"DeleteAccountResponse": objectSchema([]string{"deleted", "openid", "qinglong_cleanup", "env_entries_removed", "tasks_deleted"}, map[string]any{
+					"deleted":             int64Schema(),
+					"openid":              map[string]any{"type": "string"},
+					"qinglong_cleanup":    map[string]any{"type": "string", "enum": []string{"completed", "skipped"}},
+					"env_entries_removed": map[string]any{"type": "integer"},
+					"tasks_deleted":       map[string]any{"type": "integer"},
 				}),
 				"AccountRefRequest": objectSchema(nil, map[string]any{
 					"ref": map[string]any{"type": "string", "description": "账号 ID、UIN 或 openid。支持批量操作的接口不传时表示全部账号。"},
+				}),
+				"AccountRemarkRequest": objectSchema([]string{"ref", "remark"}, map[string]any{
+					"ref":    map[string]any{"type": "string"},
+					"remark": map[string]any{"type": "string", "maxLength": 80},
+				}),
+				"ProxySpec": objectSchema(nil, map[string]any{
+					"mode":                  map[string]any{"type": "string", "enum": []string{"direct", "static", "api"}, "default": "direct"},
+					"proxy_type":            map[string]any{"type": "string", "enum": []string{"http", "socks5"}, "default": "http", "description": "http 使用 HTTP CONNECT。"},
+					"static_proxy":          map[string]any{"type": "string", "example": "user:pass@127.0.0.1:8080"},
+					"api_url":               map[string]any{"type": "string", "format": "uri", "description": "可携带省市参数；响应支持 txt、json、json2 及常见嵌套字段。"},
+					"provider_profile_id":   nullableInt64Schema(),
+					"region_code":           map[string]any{"type": "string", "description": "品赞 6 位城市编码，all 表示全国。"},
+					"region_province":       map[string]any{"type": "string"},
+					"region_city":           map[string]any{"type": "string"},
+					"refresh_ahead_minutes": map[string]any{"type": "integer", "minimum": 5, "maximum": 90, "default": 5},
+				}),
+				"AccountProxyRequest": objectSchema([]string{"ref", "mode"}, map[string]any{
+					"ref":                   map[string]any{"type": "string", "description": "账号 ID、UIN 或 openid。"},
+					"mode":                  map[string]any{"type": "string", "enum": []string{"direct", "static", "api"}},
+					"proxy_type":            map[string]any{"type": "string", "enum": []string{"http", "socks5"}},
+					"static_proxy":          map[string]any{"type": "string"},
+					"api_url":               map[string]any{"type": "string", "format": "uri"},
+					"provider_profile_id":   nullableInt64Schema(),
+					"region_code":           map[string]any{"type": "string"},
+					"region_province":       map[string]any{"type": "string"},
+					"region_city":           map[string]any{"type": "string"},
+					"refresh_ahead_minutes": map[string]any{"type": "integer", "minimum": 5, "maximum": 90, "default": 5},
+				}),
+				"AccountProxyTestRequest": objectSchema(nil, map[string]any{
+					"ref":                   map[string]any{"type": "string", "description": "仅传 ref 时测试已保存配置；也可直接传代理配置。"},
+					"mode":                  map[string]any{"type": "string", "enum": []string{"direct", "static", "api"}},
+					"proxy_type":            map[string]any{"type": "string", "enum": []string{"http", "socks5"}},
+					"static_proxy":          map[string]any{"type": "string"},
+					"api_url":               map[string]any{"type": "string", "format": "uri"},
+					"provider_profile_id":   nullableInt64Schema(),
+					"region_code":           map[string]any{"type": "string"},
+					"region_province":       map[string]any{"type": "string"},
+					"region_city":           map[string]any{"type": "string"},
+					"refresh_ahead_minutes": map[string]any{"type": "integer", "minimum": 5, "maximum": 90, "default": 5},
+				}),
+				"AccountProxySetting": objectSchema([]string{"account_id", "mode", "proxy_type", "configured", "updated_at"}, map[string]any{
+					"account_id":            int64Schema(),
+					"mode":                  map[string]any{"type": "string", "enum": []string{"direct", "static", "api"}},
+					"proxy_type":            map[string]any{"type": "string", "enum": []string{"http", "socks5"}},
+					"static_proxy":          map[string]any{"type": "string"},
+					"api_url":               map[string]any{"type": "string"},
+					"provider_profile_id":   nullableInt64Schema(),
+					"region_code":           map[string]any{"type": "string"},
+					"region_province":       map[string]any{"type": "string"},
+					"region_city":           map[string]any{"type": "string"},
+					"refresh_ahead_minutes": map[string]any{"type": "integer", "minimum": 5, "maximum": 90},
+					"token_ttl_minutes":     map[string]any{"type": "integer", "minimum": 1, "description": "该账号最近一次应用宝响应中的令牌有效期，用于估算实际刷新周期。"},
+					"configured":            map[string]any{"type": "boolean"},
+					"updated_at":            int64Schema(),
+				}),
+				"ProxyProviderProfileRequest": objectSchema([]string{"name", "provider"}, map[string]any{
+					"name":               map[string]any{"type": "string", "maxLength": 50, "example": "巨量代理 1"},
+					"provider":           map[string]any{"type": "string", "enum": []string{"ipzan", "juliang"}, "default": "ipzan"},
+					"proxy_type":         map[string]any{"type": "string", "enum": []string{"http", "socks5"}, "default": "http"},
+					"authorization_mode": map[string]any{"type": "string", "enum": []string{"auth", "whitelist"}, "default": "auth", "description": "auth 使用提取结果中的临时账号密码；whitelist 依赖服务器出口 IP 白名单。"},
+					"api_url":            map[string]any{"type": "string", "format": "uri", "description": "品赞配置填写包含 no 和 secret 的 core-extract HTTPS 链接。"},
+					"trade_no":           map[string]any{"type": "string", "description": "巨量企业动态代理业务编号。"},
+					"api_key":            map[string]any{"type": "string", "minLength": 32, "maxLength": 32, "description": "巨量业务 API Key。"},
+				}),
+				"ProxyProviderProfile": objectSchema([]string{"id", "name", "provider", "proxy_type", "api_url"}, map[string]any{
+					"id":         int64Schema(),
+					"name":       map[string]any{"type": "string"},
+					"provider":   map[string]any{"type": "string", "enum": []string{"ipzan", "juliang"}},
+					"proxy_type": map[string]any{"type": "string", "enum": []string{"http", "socks5"}},
+					"api_url":    map[string]any{"type": "string", "format": "uri"},
+					"created_at": int64Schema(),
+					"updated_at": int64Schema(),
+				}),
+				"ProxyArea": objectSchema([]string{"code", "name"}, map[string]any{
+					"code": map[string]any{"type": "string", "example": "370100"},
+					"name": map[string]any{"type": "string", "example": "济南市"},
+				}),
+				"AccountProxyTestResponse": objectSchema([]string{"resolved", "proxy"}, map[string]any{
+					"resolved":    map[string]any{"type": "boolean"},
+					"proxy":       map[string]any{"type": "string", "description": "不含账号密码的代理入口地址。"},
+					"exit_ip":     map[string]any{"type": "string", "description": "通过代理探测到的实际出口 IP。"},
+					"exit_region": map[string]any{"type": "string", "description": "实际出口省份或地区。"},
+					"exit_city":   map[string]any{"type": "string", "description": "实际出口城市。"},
+					"probe_error": map[string]any{"type": "string", "description": "代理已提取但出口探测失败时的提示。"},
 				}),
 				"RefreshResponse": oneOfSchema(
 					refSchema("RefreshResult"),
@@ -301,14 +564,44 @@ func newOpenAPISpec() map[string]any {
 					"app_id":  map[string]any{"type": "string"},
 					"payload": freeFormObjectSchema("完整的 operateWxData 请求 JSON。"),
 				}),
-				"WxappResponse": objectSchema([]string{"openid", "result"}, map[string]any{
+				"WxappAccountLabel": objectSchema([]string{"id"}, map[string]any{
+					"id":       int64Schema(),
+					"alias":    nullableStringSchema("账号别名。"),
+					"nickname": nullableStringSchema("账号昵称。"),
+					"remark":   nullableStringSchema("用户设置的账号备注。"),
+				}),
+				"WxappResponse": objectSchema([]string{"openid", "account", "result"}, map[string]any{
 					"openid": map[string]any{"type": "string"},
+					"account": refSchema("WxappAccountLabel"),
 					"result": freeFormObjectSchema("wxapp 接口返回结果。"),
 				}),
 				"QingLongStatus": objectSchema([]string{"configured", "connected"}, map[string]any{
 					"configured": map[string]any{"type": "boolean"},
 					"connected":  map[string]any{"type": "boolean"},
 					"error":      nullableStringSchema("连接失败时的错误摘要。"),
+				}),
+				"QingLongConfig": objectSchema([]string{"url", "client_id", "secret_configured", "configured"}, map[string]any{
+					"type":              map[string]any{"type": "string", "enum": []string{"qinglong", "daidai", "arcadia"}},
+					"active_type":       map[string]any{"type": "string", "enum": []string{"qinglong", "daidai", "arcadia"}},
+					"url":               map[string]any{"type": "string"},
+					"client_id":         map[string]any{"type": "string"},
+					"secret_configured": map[string]any{"type": "boolean"},
+					"configured":        map[string]any{"type": "boolean"},
+					"connected":         map[string]any{"type": "boolean"},
+					"profiles":          freeFormObjectSchema("按面板类型返回已保存的非敏感连接信息。"),
+				}),
+				"QingLongConfigRequest": objectSchema(nil, map[string]any{
+					"type":          map[string]any{"type": "string", "enum": []string{"qinglong", "daidai", "arcadia"}, "default": "qinglong"},
+					"url":           map[string]any{"type": "string", "example": "http://qinglong:5700"},
+					"client_id":     map[string]any{"type": "string", "description": "青龙 Client ID 或呆呆 App Key；Arcadia 模式忽略此字段。"},
+					"client_secret": map[string]any{"type": "string", "writeOnly": true, "description": "青龙 Client Secret、呆呆 App Secret 或 Arcadia OpenAPI Token；留空表示保留。"},
+					"clear":         map[string]any{"type": "boolean", "description": "设为 true 时清除连接配置。"},
+				}),
+				"QingLongSyncResponse": objectSchema([]string{"account", "name", "value", "added"}, map[string]any{
+					"account": refSchema("AccountPublic"),
+					"name":    map[string]any{"type": "string", "example": "YYB_SERVER"},
+					"value":   map[string]any{"type": "string"},
+					"added":   map[string]any{"type": "boolean"},
 				}),
 				"AccountJob": objectSchema([]string{"script_key", "name", "schedule", "provisioned", "enabled", "running"}, map[string]any{
 					"script_key":         map[string]any{"type": "string"},

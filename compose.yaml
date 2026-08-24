@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: local/yyb-go:58492557cc66
+    image: local/yyb-go:latest
     container_name: yyb-go
     restart: unless-stopped
     command:
@@ -14,21 +14,35 @@ services:
       - -resource-root
       - /app/resource
       - -keepalive-interval
-      - ${YYB_KEEPALIVE_INTERVAL:-30m}
+      - ${YYB_KEEPALIVE_INTERVAL:-1m}
       - -keepalive-ahead
       - ${YYB_KEEPALIVE_AHEAD:-45m}
     environment:
-      QL_URL: ${QL_URL:-http://qinglong:5700}
+      PANEL_TYPE: ${PANEL_TYPE:-qinglong}
+      QL_URL: ${QL_URL:-}
       QL_CLIENT_ID: ${QL_CLIENT_ID:-}
       QL_CLIENT_SECRET: ${QL_CLIENT_SECRET:-}
+      DAIDAI_URL: ${DAIDAI_URL:-}
+      DAIDAI_APP_KEY: ${DAIDAI_APP_KEY:-}
+      DAIDAI_APP_SECRET: ${DAIDAI_APP_SECRET:-}
+      ARCADIA_URL: ${ARCADIA_URL:-}
+      ARCADIA_TOKEN: ${ARCADIA_TOKEN:-}
       YYB_QINGLONG_SERVER: ${YYB_QINGLONG_SERVER:-yyb-go:8000}
-      YYB_QINGLONG_REPO: ${YYB_QINGLONG_REPO:-SuperNaiBA_YYB-GO-Script}
+      YYB_QINGLONG_REPO: ${YYB_QINGLONG_REPO:-SuperNaiBA_YYB-GO-Script,525815266_YYB-Go-Enhanced/scripts}
+      YYB_AUTH_DRIVER: ${YYB_AUTH_DRIVER:-}
+      YYB_AUTH_DSN: ${YYB_AUTH_DSN:-}
+      YYB_AUTH_MYSQL_DSN: ${YYB_AUTH_MYSQL_DSN:-}
+      YYB_ADMIN_USER: ${YYB_ADMIN_USER:-}
+      YYB_ADMIN_PASSWORD: ${YYB_ADMIN_PASSWORD:-}
+      YYB_COOKIE_SECURE: ${YYB_COOKIE_SECURE:-false}
     volumes:
       - ./data/db:/app/resource/db
       - ./data/avatars:/app/resource/avatars
       - ./data/qr:/app/resource/qr
+    ports:
+      - "0.0.0.0:9001:8000"
     networks:
-      - qinglong
+      - trim-default
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/health"]
       interval: 30s
@@ -40,34 +54,26 @@ services:
     cap_drop:
       - ALL
 
-  yyb-web:
+  wx-proxy:
     build:
       context: .
-      dockerfile: Dockerfile.web
-    image: local/yyb-web:1.27
-    container_name: yyb-web
+      dockerfile: Dockerfile.proxy
+    image: local/wx-proxy:latest
+    container_name: wx-proxy
     restart: unless-stopped
     depends_on:
       yyb-go:
         condition: service_healthy
     environment:
-      YYB_WEB_USER: ${YYB_WEB_USER:-admin}
-      YYB_WEB_PASSWORD: ${YYB_WEB_PASSWORD:?Set YYB_WEB_PASSWORD in .env}
+      PROXY_PORT: "8787"
+      YYB_URL: "http://yyb-go:8000"
+      AUTH_TOKEN: "aa06c54e82f5439dc025e5f223b6466f"
     ports:
-      - "${YYB_BIND_ADDRESS:-0.0.0.0}:${YYB_PORT:-8000}:8080"
+      - "0.0.0.0:8787:8787"
     networks:
-      - qinglong
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    cap_add:
-      - CHOWN
-      - DAC_OVERRIDE
-      - SETGID
-      - SETUID
+      - trim-default
 
 networks:
-  qinglong:
+  trim-default:
     external: true
-    name: qinglong_default
+    name: trim-default
