@@ -122,6 +122,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except Exception as e:
             self._send_json(502, {"status": False, "message": f"request error: {e}"})
 
+    def _forward_getphonenumber(self, body):
+        """转发到 YYB /wxapp/getPhoneNumber，提取手机号授权 code 返回 smallcat 格式。
+
+        colorful.js 期望 data.code 是微信手机号授权 code。
+        """
+        try:
+            parsed_body = json.loads(body) if body else {}
+        except Exception:
+            parsed_body = {}
+
+        mapped = {
+            "ref": parsed_body.get("ref") or parsed_body.get("openid") or "",
+            "app_id": parsed_body.get("app_id") or parsed_body.get("appid") or "",
+        }
+        req = urllib.request.Request(
+            f"{YYB_URL}/wxapp/getPhoneNumber",
+            data=json.dumps(mapped).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = resp.read().decode("utf-8")
+                parsed = json.loads(raw)
+            if parsed.get("code") != 0:
+                self._send_json(502, {"status": False, "message": f"YYB code={parsed.get('code')}: {parsed.get('msg','')}"})
+                return
+            result = (parsed.get("data") or {}).get("result") or {}
+            code = result.get("code", "")
+            self._send_json(200, {"status": True, "data": {"code": code}, "raw": parsed})
+        except urllib.error.HTTPError as e:
+            raw = e.read().decode("utf-8", errors="replace")
+            self._send_json(502, {"status": False, "message": f"YYB {e.code}: {raw}"})
+        except Exception as e:
+            self._send_json(502, {"status": False, "message": f"request error: {e}"})
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length) if length > 0 else b""
@@ -129,9 +165,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = self.path.rstrip("/")
 
         # /wx/getphonenumber — 兼容 colorful.js 调用路径（脚本硬编码 /wx/getphonenumber）
-        # 转发到 YYB /wxapp/getPhoneNumber
         if path == "/wx/getphonenumber":
-            return self._forward_post_yyb("/wxapp/getPhoneNumber", body)
+            return self._forward_getphonenumber(body)
 
         # /wxapp/getPhoneNumber — YYB 原生接口
         if path == "/wxapp/getPhoneNumber":
