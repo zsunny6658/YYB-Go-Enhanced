@@ -134,3 +134,184 @@ func TestAccountPublicRecommendsRescanAfterTwentyFiveDays(t *testing.T) {
 		t.Fatal("RescanRecommended = true before 25 days")
 	}
 }
+
+func TestUpsertAccountReusesLowestFreeID(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	first, err := db.UpsertAccount(ctx, "openid-1", "buffer", nil, nil, nil, nil, nil, nil)
+	if err != nil || first.ID != 1 {
+		t.Fatalf("first account = %+v, err=%v", first, err)
+	}
+	if err := db.DeleteAccount(ctx, first.ID); err != nil {
+		t.Fatalf("DeleteAccount() error = %v", err)
+	}
+	recreated, err := db.UpsertAccount(ctx, "openid-2", "buffer", nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("recreated account error = %v", err)
+	}
+	if recreated.ID != 1 {
+		t.Fatalf("recreated account id = %d, want 1", recreated.ID)
+	}
+}
+
+func TestUpsertAccountDoesNotConsumeIDOnDuplicate(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	status := "alive"
+	first, err := db.UpsertAccount(ctx, "same-openid", "buffer-1", nil, nil, nil, nil, nil, &status)
+	if err != nil {
+		t.Fatalf("first UpsertAccount() error = %v", err)
+	}
+	updated, err := db.UpsertAccount(ctx, "same-openid", "buffer-2", nil, nil, nil, nil, nil, &status)
+	if err != nil {
+		t.Fatalf("duplicate UpsertAccount() error = %v", err)
+	}
+	if updated.ID != first.ID || updated.LoginBuffer != "buffer-2" {
+		t.Fatalf("duplicate upsert = id %d/%d buffer %q", first.ID, updated.ID, updated.LoginBuffer)
+	}
+	next, err := db.UpsertAccount(ctx, "next-openid", "buffer-3", nil, nil, nil, nil, nil, &status)
+	if err != nil {
+		t.Fatalf("next UpsertAccount() error = %v", err)
+	}
+	if next.ID != first.ID+1 {
+		t.Fatalf("next account id = %d, want %d", next.ID, first.ID+1)
+	}
+}
+
+func TestUpsertAccountReusesGapAfterDelete(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	status := "alive"
+	first, err := db.UpsertAccount(ctx, "gap-openid-1", "buffer-1", nil, nil, nil, nil, nil, &status)
+	if err != nil {
+		t.Fatalf("first UpsertAccount() error = %v", err)
+	}
+	second, err := db.UpsertAccount(ctx, "gap-openid-2", "buffer-2", nil, nil, nil, nil, nil, &status)
+	if err != nil {
+		t.Fatalf("second UpsertAccount() error = %v", err)
+	}
+	if err := db.DeleteAccount(ctx, first.ID); err != nil {
+		t.Fatalf("DeleteAccount() error = %v", err)
+	}
+	reused, err := db.UpsertAccount(ctx, "gap-openid-3", "buffer-3", nil, nil, nil, nil, nil, &status)
+	if err != nil {
+		t.Fatalf("reused UpsertAccount() error = %v", err)
+	}
+	if reused.ID != first.ID || second.ID != 2 {
+		t.Fatalf("gap reuse IDs = first:%d second:%d reused:%d", first.ID, second.ID, reused.ID)
+	}
+}
+
+func TestIncompleteAccountCleanupProtectsValidAccounts(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	unknown := "unknown"
+	if _, err = db.UpsertAccount(ctx, "incomplete-openid", "", nil, nil, nil, nil, nil, &unknown); err != nil {
+		t.Fatalf("seed incomplete account: %v", err)
+	}
+	valid := "alive"
+	if _, err = db.UpsertAccount(ctx, "valid-openid", "buffer", nil, nil, nil, nil, nil, &valid); err != nil {
+		t.Fatalf("seed valid account: %v", err)
+	}
+	candidates, err := db.ListIncompleteAccounts(ctx)
+	if err != nil || len(candidates) != 1 || candidates[0].OpenID != "incomplete-openid" {
+		t.Fatalf("cleanup candidates = %#v, err = %v", candidates, err)
+	}
+	removed, err := db.DeleteIncompleteAccounts(ctx, []int64{candidates[0].ID})
+	if err != nil || len(removed) != 1 {
+		t.Fatalf("removed = %#v, err = %v", removed, err)
+	}
+	if _, err = db.GetAccountByOpenID(ctx, "valid-openid"); err != nil {
+		t.Fatalf("valid account was removed: %v", err)
+	}
+}
+
+func TestUpsertAccountRejectsEmptyOpenID(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer db.Close()
+	if _, err = db.UpsertAccount(context.Background(), "  ", "buffer", nil, nil, nil, nil, nil, nil); err == nil {
+		t.Fatal("UpsertAccount() accepted empty openid")
+	}
+}
+
+func TestCompactAccountIDsRemapsChildren(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	for _, item := range []struct {
+		id     int
+		openid string
+	}{
+		{1, "compact-1"}, {3, "compact-3"}, {5, "compact-5"},
+	} {
+		_, err = db.sql.ExecContext(ctx, `INSERT INTO wechat_accounts
+			(id, openid, login_buffer, status, created_at, updated_at) VALUES(?,?,?,?,?,?)`,
+			item.id, item.openid, "buffer", "alive", 1, 1)
+		if err != nil {
+			t.Fatalf("seed account %d: %v", item.id, err)
+		}
+	}
+	if _, err = db.sql.ExecContext(ctx, `INSERT INTO sessions
+		(wechat_account_id, tcp_proxy, session_blob, expires_at, created_at, updated_at)
+		VALUES(5, '', '{}', ?, 1, 1)`, time.Now().Add(time.Hour).Unix()); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	if _, err = db.sql.ExecContext(ctx, `INSERT INTO account_script_jobs
+		(account_id, script_key, ql_cron_id, schedule, created_at, updated_at)
+		VALUES(5, 'test.py', 9, '* * * * *', 1, 1)`); err != nil {
+		t.Fatalf("seed script job: %v", err)
+	}
+	if _, err = db.sql.ExecContext(ctx, `INSERT INTO account_push_settings
+		(account_id, channel, token_env_name, topic_env_name, created_at, updated_at)
+		VALUES(5, 'none', '', '', 1, 1)`); err != nil {
+		t.Fatalf("seed push setting: %v", err)
+	}
+	if _, err = db.sql.ExecContext(ctx, `INSERT INTO account_proxy_settings
+		(account_id, mode, proxy_type, static_proxy, api_url, created_at, updated_at)
+		VALUES(5, 'direct', 'http', '', '', 1, 1)`); err != nil {
+		t.Fatalf("seed proxy setting: %v", err)
+	}
+	mapping, err := db.CompactAccountIDs(ctx)
+	if err != nil {
+		t.Fatalf("CompactAccountIDs() error = %v", err)
+	}
+	if mapping[3] != 2 || mapping[5] != 3 || len(mapping) != 2 {
+		t.Fatalf("mapping = %#v", mapping)
+	}
+	var count int
+	if err = db.sql.QueryRowContext(ctx, "SELECT COUNT(*) FROM wechat_accounts WHERE id IN (1,2,3)").Scan(&count); err != nil || count != 3 {
+		t.Fatalf("compacted accounts = %d, err = %v", count, err)
+	}
+	for _, table := range []string{"sessions", "account_script_jobs", "account_push_settings", "account_proxy_settings"} {
+		var id int64
+		column := "account_id"
+		if table == "sessions" {
+			column = "wechat_account_id"
+		}
+		if err = db.sql.QueryRowContext(ctx, "SELECT "+column+" FROM "+table+" LIMIT 1").Scan(&id); err != nil || id != 3 {
+			t.Fatalf("%s reference = %d, err = %v", table, id, err)
+		}
+	}
+}

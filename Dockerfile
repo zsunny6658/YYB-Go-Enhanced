@@ -7,15 +7,17 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
+RUN go test ./...
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/yyb-go ./cmd/yyb-go
 
 FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates wget \
+RUN apk add --no-cache ca-certificates tzdata wget \
     && addgroup -S yyb \
     && adduser -S -G yyb -h /app yyb
 
 WORKDIR /app
+ENV TZ=Asia/Shanghai
 COPY --from=build /out/yyb-go /app/yyb-go
 COPY resource /tmp/resource-src
 

@@ -43,9 +43,10 @@ async function newQR(){
  clearInterval(timer);
  document.getElementById('qr').textContent='请稍候';
  document.getElementById('s').textContent='正在生成二维码';
- const r=await api('/qr',{method:'POST'});
+ const r=await api('/qr?as_base64=true',{method:'POST'});
  sid=r.session_id;
- document.getElementById('qr').innerHTML='<img alt="二维码" style="width:240px;height:240px" src="'+r.image_url+'">';
+ const source=r.image_base64||r.image_url;
+ document.getElementById('qr').innerHTML='<img alt="二维码" style="width:240px;height:240px" src="'+source+'" onerror="this.parentElement.textContent=\'二维码图片加载失败，请检查反向代理是否转发 /qr/* 路径\'">';
  document.getElementById('s').textContent='等待扫码';
  timer=setInterval(poll,1500);
 }

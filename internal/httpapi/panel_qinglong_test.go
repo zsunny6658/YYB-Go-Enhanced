@@ -94,3 +94,58 @@ func TestQingLongDriverLogDetailDoesNotRetryFailedRequest(t *testing.T) {
 		t.Fatalf("LogDetail() requests = %d, want 1", requestCount)
 	}
 }
+
+func TestQingLongDriverRetriesCronWithoutUnsupportedLogName(t *testing.T) {
+	var createBodies []map[string]any
+	var updateBodies []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/open/auth/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "data": map[string]any{"token": "token", "expiration": 3600}})
+		case "/open/crons":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode cron body: %v", err)
+			}
+			if r.Method == http.MethodPost {
+				createBodies = append(createBodies, body)
+				if _, exists := body["log_name"]; exists {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = w.Write([]byte(`{"statusCode":400,"error":"Bad Request","message":"Validation failed","validation":{"body":{"keys":["log_name"],"message":"\\\"log_name\\\" is not allowed"}}}`))
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "data": map[string]any{"id": 7, "name": body["name"]}})
+				return
+			}
+			updateBodies = append(updateBodies, body)
+			if _, exists := body["log_name"]; exists {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"statusCode":400,"error":"Bad Request","message":"Validation failed","validation":{"body":{"keys":["log_name"],"message":"\\\"log_name\\\" is not allowed"}}}`))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "data": nil})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	driver := newQingLongDriver(server.URL, "id", "secret", 5*time.Second)
+	cron, err := driver.CreateCron(context.Background(), "test", "task test.py", "0 8 * * *", "", "managed-log")
+	if err != nil || cron.ID != 7 {
+		t.Fatalf("CreateCron() = %+v, %v", cron, err)
+	}
+	if err := driver.UpdateCron(context.Background(), 7, "test", "task test.py", "0 8 * * *", "", "managed-log"); err != nil {
+		t.Fatalf("UpdateCron() error = %v", err)
+	}
+	if len(createBodies) != 2 || len(updateBodies) != 2 {
+		t.Fatalf("retry counts: create=%d update=%d", len(createBodies), len(updateBodies))
+	}
+	if _, ok := createBodies[1]["log_name"]; ok {
+		t.Fatal("retry create still included unsupported log_name")
+	}
+	if _, ok := updateBodies[1]["log_name"]; ok {
+		t.Fatal("retry update still included unsupported log_name")
+	}
+}

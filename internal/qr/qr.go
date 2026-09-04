@@ -1,11 +1,16 @@
 package qr
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -158,7 +163,14 @@ func (c *Client) FetchQRCodeImage(ctx context.Context, sess *Session) ([]byte, e
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("QR image HTTP %d", resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateQRCodeImage(data); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 func (c *Client) PollQRCode(ctx context.Context, sess *Session) (PollResult, error) {
@@ -280,7 +292,25 @@ func (c *Client) RefreshLoginBuffer(ctx context.Context, creds protocol.LoginBuf
 }
 
 func DataURIJPEG(data []byte) string {
-	return "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(data)
+	return DataURIImage(data)
+}
+
+func DataURIImage(data []byte) string {
+	mime := http.DetectContentType(data)
+	if !strings.HasPrefix(mime, "image/") {
+		mime = "image/jpeg"
+	}
+	return "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data)
+}
+
+func validateQRCodeImage(data []byte) error {
+	if len(data) == 0 {
+		return fmt.Errorf("微信二维码接口返回空内容，可能被网络或代理拦截")
+	}
+	if _, format, err := image.DecodeConfig(bytes.NewReader(data)); err != nil {
+		return fmt.Errorf("微信二维码接口返回的不是有效图片，可能被网络或代理拦截（%s）", format)
+	}
+	return nil
 }
 
 func parsePoll(text string) (*int, string) {

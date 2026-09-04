@@ -7,7 +7,8 @@
     "/users": ["用户管理", "成员与访问权限"],
     "/settings": ["个人设置", "资料与安全"]
   };
-  const current = pages[location.pathname] || ["YYB Go", "管理控制台"];
+  const view = new URLSearchParams(location.search).get("view");
+  const current = location.pathname === "/runs" && view === "push" ? ["独立推送", "账号通知设置"] : (pages[location.pathname] || ["YYB Go", "管理控制台"]);
   const main = document.querySelector("main");
   if (!main) return;
 
@@ -16,6 +17,7 @@
     scan: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 8v8M8 12h8"/></svg>',
     proxy: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="8" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="10" cy="17" r="2"/></svg>',
     runs: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/><path d="M4 5v14"/></svg>',
+    push: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg>',
     account: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><circle cx="12" cy="9" r="3"/><path d="M7.5 18c.7-2.4 2.2-3.6 4.5-3.6s3.8 1.2 4.5 3.6"/></svg>',
     logs: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>',
     test: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m13 2-9 12h7l-1 8 9-12h-7z"/></svg>',
@@ -30,6 +32,7 @@
       ["/?focus=accounts", "account", "我的微信账号", true, false],
       ["/scan", "scan", "添加账号", true, false],
       ["/runs", "runs", "账号调度", true, false],
+      ["/runs?view=push", "push", "独立推送", true, false],
       ["/runs?view=logs", "logs", "调用记录", true, false],
       ["/?focus=test", "test", "接口测试", true, false],
       ["/docs/index.html", "docs", "接口文档", true, false]
@@ -94,6 +97,8 @@
     document.getElementById("platformAvatar").textContent = Array.from(name)[0]?.toUpperCase() || "Y";
     shell.querySelectorAll('[data-admin-only="true"]').forEach(link => { link.hidden = user.role !== "admin"; });
     shell.querySelectorAll('[data-auth-only="true"]').forEach(link => { link.hidden = !authEnabled; });
+    const repairAccountsButton = document.getElementById("repairAccountsBtn");
+    if (repairAccountsButton) repairAccountsButton.hidden = authEnabled && user.role !== "admin";
     document.querySelector(".platform-sidebar-foot").hidden = !authEnabled;
   }).catch(() => {
     document.getElementById("platformUserName").textContent = "状态未知";

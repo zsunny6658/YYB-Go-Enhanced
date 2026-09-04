@@ -46,6 +46,11 @@ type jobActionIn struct {
 	Enabled   bool   `json:"enabled"`
 }
 
+type runLogIn struct {
+	Ref    string `json:"ref"`
+	LogKey string `json:"log_key"`
+}
+
 type pushSettingIn struct {
 	Ref     string  `json:"ref"`
 	Channel string  `json:"channel"`
@@ -259,15 +264,29 @@ func (a *App) handleQingLongRuns(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleQingLongRunLog(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	acc, ok := a.resolveAccountFromQuery(w, r)
+	ref := strings.TrimSpace(r.URL.Query().Get("ref"))
+	logKey := strings.TrimSpace(r.URL.Query().Get("log_key"))
+	if r.Method == http.MethodPost {
+		var body runLogIn
+		if err := decodeOptionalJSON(r, &body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		ref = strings.TrimSpace(body.Ref)
+		logKey = strings.TrimSpace(body.LogKey)
+	}
+	acc, ok := a.resolveAccountRef(w, r, ref)
 	if !ok {
 		return
 	}
-	logKey := strings.TrimSpace(r.URL.Query().Get("log_key"))
+	if logKey == "" {
+		writeError(w, http.StatusBadRequest, "缺少日志键")
+		return
+	}
 	runs, err := a.accountRunHistory(r.Context(), acc.ID)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
@@ -296,26 +315,38 @@ func (a *App) handleQingLongRunLog(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "日志路径不合法")
 		return
 	}
-	// The log key already identifies the file. This is especially important for
-	// Arcadia: CronLog would first list all tasks and directories again, which
-	// can exceed a reverse proxy timeout before the browser receives JSON.
-	logText, err := a.qinglong.logDetail(r.Context(), logKey[:separator], logKey[separator+1:])
-	if err != nil && latest && a.qinglong.getPanelType() != PanelTypeArcadia {
-		// QingLong installations differ in which file-detail permission and route
-		// they expose. Keep its task-log fallback for the latest run only.
-		logText, err = a.qinglong.cronLog(r.Context(), selected.QLCronID)
+	var logText string
+	var logErr error
+	if latest && a.qinglong.getPanelType() != PanelTypeArcadia {
+		// QingLong's task-log endpoint is the same path used by its own UI and
+		// avoids reverse proxies that block or time out /open/logs/detail.
+		logText, logErr = a.qinglong.cronLog(r.Context(), selected.QLCronID)
+		if logErr != nil {
+			logText, logErr = a.qinglong.logDetail(r.Context(), logKey[:separator], logKey[separator+1:])
+		}
+	} else {
+		// Historical files (and Arcadia's isolated files) are addressed by the
+		// log key because there is no reliable current-task fallback.
+		logText, logErr = a.qinglong.logDetail(r.Context(), logKey[:separator], logKey[separator+1:])
 	}
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+	if logErr != nil {
+		writeError(w, http.StatusBadGateway, logErr.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"account_id": acc.ID, "script_key": selected.ScriptKey, "log_key": logKey, "log": logText})
 }
 
 func (a *App) accountRunHistory(ctx context.Context, accountID int64) ([]accountRunPublic, error) {
-	sources, cronsByID, err := a.scriptCatalog(ctx)
+	// History only needs the managed cron records. Avoid rebuilding the entire
+	// script catalog on every refresh; that can require several panel requests
+	// and is especially fragile behind a reverse proxy.
+	crons, err := a.qinglong.listCrons(ctx, "")
 	if err != nil {
 		return nil, err
+	}
+	cronsByID := make(map[int64]qingLongCron, len(crons))
+	for _, cron := range crons {
+		cronsByID[cron.ID] = cron
 	}
 	jobs, err := a.db.ListAccountScriptJobs(ctx, accountID)
 	if err != nil {
@@ -325,9 +356,13 @@ func (a *App) accountRunHistory(ctx context.Context, accountID int64) ([]account
 	if err != nil {
 		return nil, err
 	}
-	sourceByKey := make(map[string]scriptSource, len(sources))
-	for _, source := range sources {
-		sourceByKey[source.Key] = source
+	sourceByKey := make(map[string]string)
+	if repos, repoErr := qingLongRepoRoots(a.cfg.QingLongRepo); repoErr == nil {
+		for _, cron := range crons {
+			if key, _, ok := parseScriptKeyFromCron(cron, repos); ok {
+				sourceByKey[key] = cron.Name
+			}
+		}
 	}
 	logRoots := make(map[string]qingLongLogEntry, len(logs))
 	for _, entry := range logs {
@@ -349,14 +384,22 @@ func (a *App) accountRunHistory(ctx context.Context, accountID int64) ([]account
 			}
 		}
 		root, exists := logRoots[rootKey]
-		if !exists {
+		children := append([]qingLongLogEntry(nil), root.Children...)
+		if !exists && strings.TrimSpace(cron.LogPath) != "" {
+			// Some QingLong versions omit the managed directory from /open/logs
+			// while still returning the latest file path on the cron record.
+			path := strings.Trim(cron.LogPath, "/")
+			if separator := strings.LastIndex(path, "/"); separator > 0 && strings.HasSuffix(strings.ToLower(path[separator+1:]), ".log") {
+				children = []qingLongLogEntry{{Title: path[separator+1:], Key: path, Type: "file", Size: 0, CreateTime: cron.getLastExecutionAt() * 1000}}
+			}
+		}
+		if len(children) == 0 {
 			continue
 		}
-		children := append([]qingLongLogEntry(nil), root.Children...)
 		sort.Slice(children, func(i, j int) bool { return children[i].CreateTime > children[j].CreateTime })
 		name := job.ScriptKey
-		if source, found := sourceByKey[job.ScriptKey]; found {
-			name = source.Name
+		if sourceName, found := sourceByKey[job.ScriptKey]; found && !strings.HasPrefix(sourceName, "[YYB:") {
+			name = sourceName
 		}
 		for index, entry := range children {
 			if entry.Type != "file" || !strings.HasSuffix(strings.ToLower(entry.Title), ".log") {

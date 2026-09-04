@@ -25,6 +25,11 @@ const (
 	juliangAPIEndpoint   = "http://v2.api.juliangip.com/company/dynamic/getips"
 )
 
+var (
+	ipzanProvinceAreasEndpoint = "https://service.ipzan.com/area-get-province"
+	ipzanCityAreasEndpoint     = "https://service.ipzan.com/area-find-citys?province="
+)
+
 type proxyProfileIn struct {
 	Name              string `json:"name"`
 	Provider          string `json:"provider"`
@@ -43,7 +48,7 @@ type proxyArea struct {
 func (a *App) handleProxyProfiles(w http.ResponseWriter, r *http.Request) {
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/proxy-profiles"), "/")
 	if path == "areas/provinces" {
-		a.handleIPZanAreas(w, r, "https://service.ipzan.com/area-get-province")
+		a.handleIPZanAreas(w, r, ipzanProvinceAreasEndpoint)
 		return
 	}
 	if path == "areas/cities" {
@@ -52,7 +57,7 @@ func (a *App) handleProxyProfiles(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "province must be a 6-digit area code")
 			return
 		}
-		a.handleIPZanAreas(w, r, "https://service.ipzan.com/area-find-citys?province="+url.QueryEscape(province))
+		a.handleIPZanAreas(w, r, ipzanCityAreasEndpoint+url.QueryEscape(province))
 		return
 	}
 	if path == "" {
@@ -405,31 +410,36 @@ func (a *App) handleIPZanAreas(w http.ResponseWriter, r *http.Request, endpoint 
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, endpoint, nil)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	client := &http.Client{Timeout: a.cfg.RequestTimeout}
-	resp, err := client.Do(req)
+	areas, err := a.fetchProxyAreas(r.Context(), endpoint)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "读取品赞地区失败: "+err.Error())
 		return
 	}
+	writeJSON(w, http.StatusOK, areas)
+}
+
+func (a *App) fetchProxyAreas(ctx context.Context, endpoint string) ([]proxyArea, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Timeout: a.cfg.RequestTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		writeError(w, http.StatusBadGateway, fmt.Sprintf("品赞地区接口返回 HTTP %d", resp.StatusCode))
-		return
+		return nil, fmt.Errorf("品赞地区接口返回 HTTP %d", resp.StatusCode)
 	}
 	var payload struct {
 		Data []proxyArea `json:"data"`
 	}
 	decoder := json.NewDecoder(io.LimitReader(resp.Body, 1<<20))
 	if err := decoder.Decode(&payload); err != nil {
-		writeError(w, http.StatusBadGateway, "无法解析品赞地区响应")
-		return
+		return nil, fmt.Errorf("无法解析品赞地区响应")
 	}
-	writeJSON(w, http.StatusOK, payload.Data)
+	return payload.Data, nil
 }
 
 func writeProxyProfileStoreError(w http.ResponseWriter, err error) {

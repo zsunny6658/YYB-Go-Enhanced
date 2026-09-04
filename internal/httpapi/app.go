@@ -49,6 +49,7 @@ type Config struct {
 	AdminUser         string
 	AdminPassword     string
 	CookieSecure      bool
+	EnablePCLogin     bool
 	SessionDuration   time.Duration
 }
 
@@ -287,6 +288,8 @@ func (a *App) Handler() http.Handler {
 	router.Any("/quick-login", gin.WrapF(a.handleQuickLoginRoot))
 	router.Any("/quick-login/*path", gin.WrapF(a.handleQuickLogin))
 	router.Any("/accounts", gin.WrapF(a.handleAccountsRoot))
+	router.Any("/accounts/repair", gin.WrapF(a.handleAccountRepair))
+	router.Any("/accounts/compact", gin.WrapF(a.handleAccountCompact))
 	router.Any("/accounts/avatar", gin.WrapF(a.handleAccountAvatar))
 	router.Any("/accounts/refresh", gin.WrapF(a.handleAccountRefresh))
 	router.Any("/accounts/resync", gin.WrapF(a.handleAccountResync))
@@ -295,6 +298,7 @@ func (a *App) Handler() http.Handler {
 	router.Any("/accounts/proxy/test", gin.WrapF(a.handleAccountProxyTest))
 	router.Any("/api/proxy-profiles", gin.WrapF(a.handleProxyProfiles))
 	router.Any("/api/proxy-profiles/*path", gin.WrapF(a.handleProxyProfiles))
+	router.Any("/api/proxy-location/recommend", gin.WrapF(a.handleProxyLocationRecommend))
 	router.Any("/api/qinglong/status", gin.WrapF(a.handleQingLongStatus))
 	router.Any("/api/qinglong/config", gin.WrapF(a.handleQingLongConfig))
 	router.Any("/api/qinglong/sync", gin.WrapF(a.handleQingLongSync))
@@ -332,7 +336,16 @@ func (a *App) handleScan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	serveFileOrText(w, r, filepath.Join(a.resources.Templates, "scan.html"), fallbackScanHTML)
+	path := filepath.Join(a.resources.Templates, "scan.html")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		serveFileOrText(w, r, path, fallbackScanHTML)
+		return
+	}
+	// Desktop-WeChat authorization is experimental and remains opt-in.
+	html := strings.ReplaceAll(string(data), "__YYB_PC_LOGIN_ENABLED__", fmt.Sprintf("%t", a.cfg.EnablePCLogin))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(html))
 }
 
 func (a *App) handleProxiesPage(w http.ResponseWriter, r *http.Request) {
@@ -378,6 +391,10 @@ func (a *App) handleQRRoot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
+	if _, err := normalizeLoginProduct(body.Product); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), a.cfg.RequestTimeout+35*time.Second)
 	defer cancel()
 	normalizedBody, proxySpec, err := a.normalizeAccountProxyInput(ctx, body)
@@ -396,13 +413,18 @@ func (a *App) handleQRRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.mu.Lock()
-	a.qrSessions[img.Session.ID] = &qrLoginSession{Session: img.Session, Client: client, ProxySpec: proxySpec, ProxyIn: normalizedBody}
+	a.qrSessions[img.Session.ID] = &qrLoginSession{
+		Session: img.Session, Client: client, ProxySpec: proxySpec, ProxyIn: normalizedBody,
+		ImageBytes: append([]byte(nil), img.ImageBytes...),
+	}
 	keep := make(map[string]bool, len(a.qrSessions))
 	for sid := range a.qrSessions {
 		keep[sid] = true
 	}
 	a.mu.Unlock()
 	path := a.resources.qrPath(img.Session.ID)
+	// The in-memory copy above is authoritative. The file is only a cache for
+	// deployments that serve the image endpoint after a process restart.
 	_ = os.WriteFile(path, img.ImageBytes, 0o644)
 	a.cleanupQR(keep)
 	basePath := "/qr"
@@ -440,12 +462,18 @@ func (a *App) handleQR(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		path := a.resources.qrPath(sessionID)
-		if _, err := os.Stat(path); err != nil {
-			writeError(w, http.StatusNotFound, "qr session not found")
+		if login := a.getQRSession(sessionID); login != nil && len(login.ImageBytes) > 0 {
+			w.Header().Set("Content-Type", http.DetectContentType(login.ImageBytes))
+			w.Header().Set("Cache-Control", "no-store")
+			_, _ = w.Write(login.ImageBytes)
 			return
 		}
-		w.Header().Set("Content-Type", "image/jpeg")
+		path := a.resources.qrPath(sessionID)
+		if _, err := os.Stat(path); err != nil {
+			writeError(w, http.StatusNotFound, "qr image not found; the QR session may have expired")
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
 		http.ServeFile(w, r, path)
 	case "poll":
 		if r.Method != http.MethodGet {
@@ -466,6 +494,16 @@ func (a *App) handleQR(w http.ResponseWriter, r *http.Request) {
 			a.dropQRSession(sessionID)
 		}
 		writeJSON(w, http.StatusOK, result)
+	case "cancel":
+		if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		// Refreshing the QR code must retire the previous session. It never
+		// touched the account database, but dropping it prevents a delayed poll
+		// or confirm request from completing an old scan unexpectedly.
+		a.dropQRSession(sessionID)
+		writeJSON(w, http.StatusOK, map[string]any{"status": "cancelled", "session_id": sessionID})
 	case "confirm":
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -479,6 +517,21 @@ func (a *App) handleQR(w http.ResponseWriter, r *http.Request) {
 		result, err := login.Client.GetLoginBuffer(r.Context(), login.Session)
 		if err != nil {
 			writeError(w, http.StatusConflict, "buffer not ready: "+err.Error())
+			return
+		}
+		// A refresh/cancel may have removed this session while the OAuth
+		// exchange was in flight. Serialize the final write with cancellation
+		// so an old QR request cannot create an account after it was retired.
+		login.mu.Lock()
+		dropAfterConfirm := false
+		defer func() {
+			login.mu.Unlock()
+			if dropAfterConfirm {
+				a.dropQRSession(sessionID)
+			}
+		}()
+		if login.cancelled {
+			writeError(w, http.StatusConflict, "qr session cancelled")
 			return
 		}
 		var userInfo map[string]any
@@ -500,6 +553,9 @@ func (a *App) handleQR(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := a.claimScannedAccount(r, acc.ID); err != nil {
+			if !existed {
+				_ = a.db.DeleteAccount(r.Context(), acc.ID)
+			}
 			writeError(w, http.StatusForbidden, err.Error())
 			return
 		}
@@ -511,7 +567,7 @@ func (a *App) handleQR(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "保存账号代理失败: "+err.Error())
 			return
 		}
-		a.dropQRSession(sessionID)
+		dropAfterConfirm = true
 		writeJSON(w, http.StatusOK, acc.Public())
 	default:
 		writeError(w, http.StatusNotFound, "qr session not found")
@@ -1193,6 +1249,12 @@ func (a *App) getQRSession(id string) *qrLoginSession {
 
 func (a *App) dropQRSession(id string) {
 	a.mu.Lock()
+	login := a.qrSessions[id]
+	if login != nil {
+		login.mu.Lock()
+		login.cancelled = true
+		login.mu.Unlock()
+	}
 	delete(a.qrSessions, id)
 	a.mu.Unlock()
 	_ = os.Remove(a.resources.qrPath(id))
@@ -1203,6 +1265,9 @@ func (a *App) pruneQR() {
 	var drop []string
 	for sid, sess := range a.qrSessions {
 		if sess.Session.Age() > a.cfg.QRSessionTTL {
+			sess.mu.Lock()
+			sess.cancelled = true
+			sess.mu.Unlock()
 			drop = append(drop, sid)
 		}
 	}

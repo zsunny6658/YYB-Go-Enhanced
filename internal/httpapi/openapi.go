@@ -79,6 +79,17 @@ func newOpenAPISpec() map[string]any {
 					}),
 				),
 			},
+			"/qr/{session_id}/cancel": map[string]any{
+				"post": openAPIOperation(
+					[]string{"qr"},
+					"取消扫码登录会话",
+					[]map[string]any{pathStringParam("session_id", "二维码会话 ID。")},
+					nil,
+					defaulted(map[string]any{
+						"200": jsonResponse("扫码会话已取消。", freeFormObjectSchema("取消结果。")),
+					}),
+				),
+			},
 			"/qr/{session_id}/confirm": map[string]any{
 				"post": openAPIOperation(
 					[]string{"qr"},
@@ -129,6 +140,17 @@ func newOpenAPISpec() map[string]any {
 					nil,
 					defaulted(map[string]any{
 						"200": jsonResponse("删除结果。", refSchema("DeleteAccountResponse")),
+					}),
+				),
+			},
+			"/accounts/repair": map[string]any{
+				"post": openAPIOperation(
+					[]string{"accounts"},
+					"预览或清理未完成扫码残留",
+					nil,
+					jsonOptionalRequestBody(freeFormObjectSchema("confirm=true 执行清理；省略或 false 仅预览。")),
+					defaulted(map[string]any{
+						"200": jsonResponse("账号整理结果。", freeFormObjectSchema("清理结果。")),
 					}),
 				),
 			},
@@ -223,6 +245,11 @@ func newOpenAPISpec() map[string]any {
 					[]map[string]any{queryStringParam("province", "6 位省份编码。", true)}, nil,
 					defaulted(map[string]any{"200": jsonResponse("城市列表。", arraySchema(refSchema("ProxyArea")))})),
 			},
+			"/api/proxy-location/recommend": map[string]any{
+				"post": openAPIOperation([]string{"proxy-profiles"}, "根据手机定位或公网 IP 推荐代理地区", nil,
+					jsonOptionalRequestBody(refSchema("ProxyLocationRequest")),
+					defaulted(map[string]any{"200": jsonResponse("匹配到供应商省市编码的推荐地区，仅用于预填。", refSchema("ProxyLocationResponse"))})),
+			},
 			"/api/qinglong/status": map[string]any{
 				"get": openAPIOperation(
 					[]string{"qinglong"}, "检查自动化面板连接状态", nil, nil,
@@ -292,6 +319,11 @@ func newOpenAPISpec() map[string]any {
 						queryStringParam("ref", "账号 ID、UIN 或 openid。", true),
 						queryStringParam("log_key", "账号运行日志列表返回的日志键。", true),
 					}, nil,
+					defaulted(map[string]any{"200": jsonResponse("日志正文。", refSchema("AccountRunLogResponse"))}),
+				),
+				"post": openAPIOperation(
+					[]string{"qinglong"}, "读取账号的一条运行日志（代理兼容）", nil,
+					jsonRequestBody(refSchema("AccountRunLogRequest")),
 					defaulted(map[string]any{"200": jsonResponse("日志正文。", refSchema("AccountRunLogResponse"))}),
 				),
 			},
@@ -468,6 +500,7 @@ func newOpenAPISpec() map[string]any {
 					"remark": map[string]any{"type": "string", "maxLength": 80},
 				}),
 				"ProxySpec": objectSchema(nil, map[string]any{
+					"product":               map[string]any{"type": "string", "enum": []string{"appstore"}, "default": "appstore", "description": "登录产品。电脑管家等产品在凭据兑换链路验证前不会创建会话。"},
 					"mode":                  map[string]any{"type": "string", "enum": []string{"direct", "static", "api"}, "default": "direct"},
 					"proxy_type":            map[string]any{"type": "string", "enum": []string{"http", "socks5"}, "default": "http", "description": "http 使用 HTTP CONNECT。"},
 					"static_proxy":          map[string]any{"type": "string", "example": "user:pass@127.0.0.1:8080"},
@@ -539,6 +572,19 @@ func newOpenAPISpec() map[string]any {
 					"code": map[string]any{"type": "string", "example": "370100"},
 					"name": map[string]any{"type": "string", "example": "济南市"},
 				}),
+				"ProxyLocationRequest": objectSchema(nil, map[string]any{
+					"latitude":  map[string]any{"type": "number", "format": "double", "minimum": -90, "maximum": 90},
+					"longitude": map[string]any{"type": "number", "format": "double", "minimum": -180, "maximum": 180},
+				}),
+				"ProxyLocationResponse": objectSchema([]string{"province", "source", "matched"}, map[string]any{
+					"province":      map[string]any{"type": "string", "example": "山东省"},
+					"city":          map[string]any{"type": "string", "example": "济南市"},
+					"source":        map[string]any{"type": "string", "enum": []string{"browser_geolocation", "client_public_ip", "server_public_ip"}},
+					"ip":            map[string]any{"type": "string"},
+					"province_code": map[string]any{"type": "string", "example": "370000"},
+					"city_code":     map[string]any{"type": "string", "example": "370100"},
+					"matched":       map[string]any{"type": "boolean"},
+				}),
 				"AccountProxyTestResponse": objectSchema([]string{"resolved", "proxy"}, map[string]any{
 					"resolved":    map[string]any{"type": "boolean"},
 					"proxy":       map[string]any{"type": "string", "description": "不含账号密码的代理入口地址。"},
@@ -571,9 +617,9 @@ func newOpenAPISpec() map[string]any {
 					"remark":   nullableStringSchema("用户设置的账号备注。"),
 				}),
 				"WxappResponse": objectSchema([]string{"openid", "account", "result"}, map[string]any{
-					"openid": map[string]any{"type": "string"},
+					"openid":  map[string]any{"type": "string"},
 					"account": refSchema("WxappAccountLabel"),
-					"result": freeFormObjectSchema("wxapp 接口返回结果。"),
+					"result":  freeFormObjectSchema("wxapp 接口返回结果。"),
 				}),
 				"QingLongStatus": objectSchema([]string{"configured", "connected"}, map[string]any{
 					"configured": map[string]any{"type": "boolean"},
@@ -655,6 +701,10 @@ func newOpenAPISpec() map[string]any {
 					"script_key": map[string]any{"type": "string"},
 					"log_key":    map[string]any{"type": "string"},
 					"log":        map[string]any{"type": "string"},
+				}),
+				"AccountRunLogRequest": objectSchema([]string{"ref", "log_key"}, map[string]any{
+					"ref":     map[string]any{"type": "string"},
+					"log_key": map[string]any{"type": "string"},
 				}),
 				"PushSetting": objectSchema([]string{"channel", "token_configured", "topic_configured"}, map[string]any{
 					"channel":          map[string]any{"type": "string", "enum": []string{"none", "serverchan", "pushplus", "qywx"}},

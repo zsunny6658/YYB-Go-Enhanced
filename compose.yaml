@@ -18,6 +18,7 @@ services:
       - -keepalive-ahead
       - ${YYB_KEEPALIVE_AHEAD:-45m}
     environment:
+      TZ: ${TZ:-Asia/Shanghai}
       PANEL_TYPE: ${PANEL_TYPE:-qinglong}
       QL_URL: ${QL_URL:-}
       QL_CLIENT_ID: ${QL_CLIENT_ID:-}
@@ -35,6 +36,7 @@ services:
       YYB_ADMIN_USER: ${YYB_ADMIN_USER:-}
       YYB_ADMIN_PASSWORD: ${YYB_ADMIN_PASSWORD:-}
       YYB_COOKIE_SECURE: ${YYB_COOKIE_SECURE:-false}
+      YYB_ENABLE_PC_LOGIN: ${YYB_ENABLE_PC_LOGIN:-false}
     volumes:
       - ./data/db:/app/resource/db
       - ./data/avatars:/app/resource/avatars
