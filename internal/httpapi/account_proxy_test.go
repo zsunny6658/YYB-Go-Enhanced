@@ -60,6 +60,13 @@ func TestProxySettingPublicUsesAccountTokenTTL(t *testing.T) {
 	if result["token_ttl_minutes"] != int64(90) {
 		t.Fatalf("token_ttl_minutes = %#v, want 90", result["token_ttl_minutes"])
 	}
+	if result["keepalive_supported"] != false || result["lifetime_class"] != "short" || result["proxy_warning"] == "" {
+		t.Fatalf("dynamic proxy status = %#v, want explicit short-lived warning", result)
+	}
+	stable := proxySettingPublic(&store.AccountProxySetting{AccountID: 7, Mode: "static", ProxyType: "http"}, account)
+	if stable["keepalive_supported"] != true || stable["proxy_warning"] != "" {
+		t.Fatalf("stable proxy status = %#v, want keepalive enabled without warning", stable)
+	}
 }
 
 func TestAccountProxyAPIParsesJSON2AndCascades(t *testing.T) {
@@ -256,6 +263,47 @@ func TestJuliangProfilesSignEachAccountRegion(t *testing.T) {
 	query := u.Query()
 	if u.Scheme != "http" || u.Host != "v2.api.juliangip.com" || query.Get("province") != "山东" || query.Get("city") != "潍坊" || query.Get("area") != "" || query.Get("auth_type") != "2" || query.Get("result_type") != "json2" || len(query.Get("sign")) != 32 {
 		t.Fatalf("resolved juliang spec = %s", spec.APIURL)
+	}
+}
+
+func TestStaticProxyProfileCanBeSelectedAndReused(t *testing.T) {
+	t.Setenv("GIN_MODE", "test")
+	app, err := NewApp(Config{ResourceRoot: t.TempDir(), RequestTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("NewApp() error = %v", err)
+	}
+	defer app.Close()
+	status := "alive"
+	account, err := app.db.UpsertAccount(context.Background(), "static-profile-openid", "buffer", nil, nil, nil, nil, nil, &status)
+	if err != nil {
+		t.Fatalf("UpsertAccount() error = %v", err)
+	}
+	handler := app.Handler()
+	created := apiRequest(t, handler, http.MethodPost, "/api/proxy-profiles", map[string]any{
+		"name": "家庭固定出口", "provider": "static", "proxy_type": "http",
+		"api_url": "user:pass@203.0.113.40:8080",
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("POST static profile status = %d body=%s", created.Code, created.Body.String())
+	}
+	var profileResponse struct{ Data store.ProxyProviderProfile `json:"data"` }
+	if err := json.Unmarshal(created.Body.Bytes(), &profileResponse); err != nil || profileResponse.Data.ID == 0 {
+		t.Fatalf("decode static profile = %#v, %v", profileResponse, err)
+	}
+	saved := apiRequest(t, handler, http.MethodPut, "/accounts/proxy", map[string]any{
+		"ref": fmt.Sprint(account.ID), "provider_profile_id": profileResponse.Data.ID,
+		"refresh_ahead_minutes": 5,
+	})
+	if saved.Code != http.StatusOK {
+		t.Fatalf("PUT static profile selection status = %d body=%s", saved.Code, saved.Body.String())
+	}
+	setting, err := app.db.GetAccountProxySetting(context.Background(), account.ID)
+	if err != nil || setting.Mode != "static" || setting.ProviderProfileID == nil {
+		t.Fatalf("static profile setting = %#v, %v", setting, err)
+	}
+	spec, err := app.proxySpecForSetting(context.Background(), setting)
+	if err != nil || spec.Mode != "static" || !strings.Contains(spec.StaticProxy, "203.0.113.40:8080") {
+		t.Fatalf("resolved static profile spec = %#v, %v", spec, err)
 	}
 }
 

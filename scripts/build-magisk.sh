@@ -2,8 +2,10 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-VERSION=${VERSION:-dev}
+VERSION=${VERSION:-$(tr -d '[:space:]' < "$ROOT/VERSION")}
 VERSION_CODE=${VERSION_CODE:-1}
+COMMIT=${COMMIT:-unknown}
+BUILD_DATE=${BUILD_DATE:-unknown}
 ARCH=${1:-arm64}
 OUT_DIR=${OUT_DIR:-"$ROOT/dist"}
 
@@ -54,7 +56,7 @@ for runtime_text_entry in "${runtime_text_entries[@]}"; do
 done
 
 CGO_ENABLED=0 GOOS=android GOARCH=arm64 \
-  go build -trimpath -ldflags="-s -w" -o "$STAGE/bin/yyb-go" "$ROOT/cmd/yyb-go"
+  go build -trimpath -ldflags="-s -w -X yyb_go/internal/version.Version=$VERSION -X yyb_go/internal/version.Commit=$COMMIT -X yyb_go/internal/version.BuildDate=$BUILD_DATE" -o "$STAGE/bin/yyb-go" "$ROOT/cmd/yyb-go"
 
 sed -i "s/^version=.*/version=$VERSION/" "$STAGE/module.prop"
 sed -i "s/^versionCode=.*/versionCode=$VERSION_CODE/" "$STAGE/module.prop"

@@ -1,5 +1,41 @@
 # 青龙修复脚本
 
+## YYB 适配脚本
+
+`scripts/` 统一收录原有业务脚本和 136 个经过 YYB 多账号适配的 Python 脚本。
+已完成文件哈希、AST 结构和名称归一化去重，并覆盖普通取码、动态 AppID、手机号
+授权 code/加密包等调用形式。青龙不再直接订阅原仓库，防止更新覆盖适配层；配置、
+青龙任务统一使用 `task 525815266_YYB-Go-Enhanced/scripts/脚本名.py`，脚本由本仓库审核发布。
+
+本次同步的 3 个脚本：
+
+- `心相印_code版.py`：采用最新心相印 AppID 和恒安 `wxappLogin` 登录/签到接口，保留 token 缓存与备用后端。
+- `益禾堂_code版.py`：采用最新企迈明文换 token 和兑吧 `3fd0cbet` 动态签到 token 解析。
+- `伊利QQ星_code.py`：新增伊利 QQ 星签到、积分任务和抽奖流程。
+
+以上脚本共用 `yyb_compat.py`，从 `YYB_SERVER` 按行读取 `地址@账号ID或OpenID`，不会伪造微信手机号授权或加密字段。
+
+## YYB 账号公共状态缓存
+
+`yyb_account_guard.py`（Python）和 `yyb-account-guard.js`（Node）提供共享的
+账号冷却缓存，默认文件为 `/ql/data/config/yyb_account_status.json`。已接入
+`aima_sign.py`、`jtexpress_sign.py`、`byd_sign.py`、`DSTX.py`、`DTSH.py`、
+`DDYX.py`、`DSMMHYSCQD.py`、`JTC.py`、`JYXEJYFHS.py`、`LDXQ.py`、`lz飞天.py`、
+`NACO会员商城签到.py`、`NWDJG.py`、`NXDC.py`、`QC.py`、`SANF.py`、`THYC.py`、
+`WRN.py`、`XFJ.py`、`jyk.py`、`weile_coin.py` 以及对应的多账号脚本：
+
+- 明确返回“未授权手机号、尚未注册、未绑定会员”等业务错误时，记录为
+  `unbound`/`unregistered`，默认冷却 24 小时；后续脚本会直接跳过该账号并继续下一个。
+- 超时、502/503、风控、活动太火爆、登录过期和 token 失效只记为临时错误，
+  默认冷却 10 分钟，不会永久禁用账号。
+- `YYB_GUARD_BYPASS=1` 可供需要“先授权/自动注册”的脚本临时绕过过滤。
+- `YYB_ACCOUNT_STATUS_FILE` 可自定义缓存路径；缓存采用临时文件原子替换，适合多任务并发读写。
+
+青龙新增任务 `YYB账号状态检查.py`，建议每 12 小时运行一次。由于开启网页登录
+认证后 `/accounts` 不能被青龙匿名读取，该任务只探测 YYB `/healthz` 并清理不在
+`YYB_SERVER` 的缓存条目，不调用业务接口，也不会制造未消费的 `wx.login code`。
+业务脚本遇到明确的未授权响应后负责写回缓存。
+
 这个目录收录了对 `SuperNaiBA/YYB-GO-Script` 中已确认报错脚本的最小修复版，用于 YYB Go 多账号调用。
 
 ## 已修复
@@ -7,11 +43,42 @@
 - `DDYX.py`、`DSMMHYSCQD.py`、`DSTX.py`、`DTSH.py`、`JTC.py`、`JYXEJYFHS.py`、`LDXQ.py`、`NWDJG.py`、`NXDC.py`、`QC.py`、`SANF.py`、`THYC.py`、`XFJ.py`、`byd_sign.py`：修复 `YYB_SERVER` 配置提示代码的缩进错误。
 - `WRN.py`：补充实际运行所需的 `sys` 导入。
 - `MS.js`：兼容会员信息的新旧返回结构，缺少 `memberId` 时停止当前账号，避免连续异常。
+- `DW.js`：多小程序执行前按 AppID 过滤公共缓存；明确返回未绑定小程序时记录账号状态，成功账号按 AppID 标记为可用。
+- `ZMNLXQ.js`：战马能量星球按 AppID 接入公共缓存，手机号/小程序授权失败只在响应明确命中时冷却账号，并修复取码失败日志中的未定义变量。
+- `oleCS.py`：OLE 超市接入公共缓存，保留原有 token 和门店缓存；网络取码失败不再误报为“未注册”。
 - `jyk.py`：正确解析 `地址@账号标识` 格式，避免把账号 ID 当作 YYB 服务地址。
 - `TCLXLC.js`：移除登录流程中对未定义 `parsedServer` 变量的引用。
 
 ## YYB 活动脚本
 
+- `asdcb_auto_sign.py`：阿水大杯茶 YYB 版每日签到。每周二先按活动本期券模板 ID 查询个人券包，准确区分未使用/已使用/已过期；未领券时按小程序源码生成 `MD5` 签名和 AES-CBC/PKCS7 `data`。微信的 `getLatestUserKey` 属于小程序运行时本地能力，当前 YYB iLink 转发若返回 `invalid api_name (-12003)`，脚本会明确显示“未提交”，不会将顶层 `success` 或静态 `receiveStatus` 误报为领取结果。可用真实动态参数通过 `ASDCB_MEMBER_CLAIM_PAYLOAD` 覆盖。7.9 折券兑换通过 `ASDCB_ENABLE_79_COUPON=1` 显式开启，默认关闭。`--dry-run` 会在券包核验后直接跳过签到、领券和兑换，并在启动行明确标记查询模式。
+
+  ```bash
+  python3 asdcb_auto_sign.py --dry-run
+  # 青龙环境变量：ASDCB_ENABLE_79_COUPON=1
+  # 可选：ASDCB_MEMBER_CLAIM_PAYLOAD={"activityId":"...","timestamp":"...","signature":"...","data":"..."}
+  ```
+
+- `mlgogo_sign.py`：马历小程序积分商城每日签到。使用 `wx86d2d7c2d832b4ce`
+  动态获取 code，按小程序内置 RSA 签名生成每次请求的 `_s`，支持多账号、签到
+  状态查询、token 持久化和失效自动重登。
+
+- `汇翼云会员日抽奖.py`：适配 `wxab79cb37a805c1ca`（響Livehouse）会员日转盘。
+  通过 `YYB_SERVER` 获取小程序登录 code，校验汇翼云账号后查询活动开放状态和
+  剩余次数，最多按服务端次数循环抽奖并汇总奖品。汇翼云自己的 JWT 并非
+  `wx.login` 返回值，首次需通过 `HYY_ACCESS_TOKENS` 按 `账号ID=JWT` 建立映射；
+  脚本随后把 `external_userid` 原子缓存到
+  `/ql/data/config/hyy_turntable_accounts.json`，后续无需反复提供 JWT。也可直接用
+  `HYY_EXTERNAL_USERIDS` 按账号配置已有的 `external_userid`。多账号模式不会共用
+  单账号凭据，避免串号；`HYY_DRAW=0` 可只查询不抽奖。
+
+- `毛豆充.py`：毛豆充 YYB 版，参考菠萝充电脚本的任务编排，但独立使用 HAR
+  确认的 `hichar.user.wxapp` 业务接口。支持动态登录、会员积分查询、每日签到
+  和视频任务（默认最多 5 次，按服务端 `nowTimes/limitTimes` 实时限流），并按
+  HAR 确认的 `/api/user/welfare/draw` 自动执行按账户实际积分抽完本轮所有次数。
+  每次抽奖前重新读取 `userWelfarePoints`，只要积分达到 1000 就继续。日志会记录开始积分、任务后积分、结束积分、任务积分收益、
+  抽奖消耗和本轮净积分收益；相同奖品会合并计数，`毛豆N个` 会按实际数量累加。连续领取奖励默认随机等待 15–30 秒，
+  可通过 `MAODOUCHONG_REWARD_DELAY_MIN/MAX` 调整；设置 `MAODOUCHONG_LOTTERY=0` 可关闭抽奖。
 - `aima_sign.py`：通过 `YYB_SERVER` 动态登录爱玛会员小程序，自动发现当前有效签到活动；不信任汇总状态字段，仅当天记录存在时跳过，否则提交一次并以当天记录校验；自动领取已达成的连续签到积分奖励（可用 `AIMA_CLAIM_SIGN_REWARDS=0` 关闭），显示 YYB 备注、会员等级、当前/累计积分、成长值、绑定车辆和优惠券数量。
 - `weile_coin.py`：通过 `YYB_SERVER` 动态获取微信小游戏 code，支持多账号查询微乐每日任务，并领取 HAR 已验证的分享福利金币和订阅更新金币。默认每次运行最多领取 1 次分享福利；设置 `WEILE_DRY_RUN=1` 可只查询不领取。
 - `qq音乐_code版.py`：通过 `YYB_SERVER` 动态获取 QQ 音乐小程序 code，支持多账号执行，并从 YYB 账号资料中读取备注或昵称用于日志和通知显示；未配置 `YYB_SERVER` 时保留旧版多端口兼容模式。
@@ -49,3 +116,14 @@ lz飞天.py
 YYB 开启鉴权时设置可选环境变量 `YYB_API_KEY`。脚本不再使用硬编码的本地 `127.0.0.1:8088` 或旧 `/login` code 服务。
 
 重新执行上游订阅可能会覆盖这些修复，建议在订阅更新后重新检查。脚本仍受原项目授权和条款约束。
+# 寻星电玩网页积分
+
+`findstars_web_points.py` 调用寻星电玩网页的活动任务接口，领取服务端返回为 `complete` 的积分任务并汇总积分变化。
+
+网页授权完成后，从浏览器请求中复制 `FS-Token`，在青龙创建环境变量：
+
+```text
+FINDSTARS_TOKENS=备注#FS-Token
+```
+
+多个账号按行填写。该令牌属于寻星网页登录态，不是 YYB 的小程序 OpenID；YYB 无法凭公众号 OpenID 直接生成它。令牌失效后脚本会提示重新网页登录授权，不会伪造积分或授权结果。

@@ -24,9 +24,10 @@ func newOpenAPISpec() map[string]any {
 		"tags": []map[string]any{
 			{"name": "health", "description": "服务健康检查"},
 			{"name": "qr", "description": "微信扫码登录"},
+			{"name": "account-links", "description": "一次性账号扫码授权链接"},
 			{"name": "quick-login", "description": "桌面微信快速授权"},
 			{"name": "accounts", "description": "已保存的微信账号"},
-			{"name": "proxy-profiles", "description": "可复用的品赞代理配置与地区"},
+			{"name": "proxy-profiles", "description": "可复用的品赞、巨量和静态代理配置与地区"},
 			{"name": "qinglong", "description": "账号级自动化面板任务与推送管理（兼容青龙、呆呆和 Arcadia）"},
 			{"name": "wxapp", "description": "wxapp 业务接口调用"},
 			{"name": "wx", "description": "兼容 /wx/* 的微信业务接口"},
@@ -41,6 +42,17 @@ func newOpenAPISpec() map[string]any {
 					nil,
 					defaulted(map[string]any{
 						"200": jsonResponse("服务正常。", refSchema("HealthResponse")),
+					}),
+				),
+			},
+			"/api/version": map[string]any{
+				"get": openAPIOperation(
+					[]string{"health"},
+					"读取当前构建版本信息",
+					nil,
+					nil,
+					defaulted(map[string]any{
+						"200": jsonResponse("版本、commit 和构建时间。", freeFormObjectSchema("version、commit、build_date、update_url。")),
 					}),
 				),
 			},
@@ -121,6 +133,53 @@ func newOpenAPISpec() map[string]any {
 					defaulted(map[string]any{
 						"200": jsonResponse("已保存的账号信息。", refSchema("AccountPublic")),
 					}),
+				),
+			},
+		"/api/account-links": map[string]any{
+				"post": openAPIOperation(
+					[]string{"account-links"},
+					"生成一次性账号扫码授权链接",
+					nil,
+					jsonRequestBody(freeFormObjectSchema("kind=update 或 add；ref 为基础账号 ID/UIN/OpenID；ttl_seconds 可选，范围 60-604800。")),
+					defaulted(map[string]any{
+						"200": jsonResponse("授权链接。链接只返回一次，数据库仅保存其 SHA-256 哈希。", freeFormObjectSchema("url、expires_at、one_time。")),
+					}),
+				),
+			},
+			"/account-link/{token}": map[string]any{
+				"get": openAPIOperation(
+					[]string{"account-links"},
+					"打开一次性扫码授权页面",
+					[]map[string]any{pathStringParam("token", "随机不可逆 bearer token。")},
+					nil,
+					defaulted(map[string]any{"200": htmlResponse("扫码授权页面。")}),
+				),
+			},
+			"/account-link/{token}/qr": map[string]any{
+				"post": openAPIOperation(
+					[]string{"account-links"},
+					"为一次性授权链接创建二维码",
+					[]map[string]any{pathStringParam("token", "随机不可逆 bearer token。")},
+					nil,
+					defaulted(map[string]any{"200": jsonResponse("二维码会话。", refSchema("QRCreateResponse"))}),
+				),
+			},
+			"/account-link/{token}/qr/{session_id}/poll": map[string]any{
+				"get": openAPIOperation(
+					[]string{"account-links"},
+					"轮询一次性授权二维码",
+					[]map[string]any{pathStringParam("token", "随机不可逆 bearer token。"), pathStringParam("session_id", "二维码会话 ID。")},
+					nil,
+					defaulted(map[string]any{"200": jsonResponse("扫码状态。", refSchema("QRPollResponse"))}),
+				),
+			},
+			"/account-link/{token}/qr/{session_id}/confirm": map[string]any{
+				"post": openAPIOperation(
+					[]string{"account-links"},
+					"确认一次性授权并更新或新增账号",
+					[]map[string]any{pathStringParam("token", "随机不可逆 bearer token。"), pathStringParam("session_id", "二维码会话 ID。")},
+					nil,
+					defaulted(map[string]any{"200": jsonResponse("保存后的账号。", refSchema("AccountPublic"))}),
 				),
 			},
 			"/accounts": map[string]any{
@@ -353,7 +412,7 @@ func newOpenAPISpec() map[string]any {
 						"component_appid": map[string]any{"type": "string"},
 					})),
 					defaulted(map[string]any{
-						"200": jsonResponse("生成授权链接；用户授权后 code 会回传到 redirect_uri。", freeFormObjectSchema("公众号网页授权结果")),
+						"200": jsonResponse("生成授权链接；当前 code 为 null 属正常状态，用户在微信内授权后 code 和 state 会回传到 redirect_uri。", freeFormObjectSchema("公众号网页授权结果")),
 					}),
 				),
 			},
@@ -364,9 +423,10 @@ func newOpenAPISpec() map[string]any {
 				"post": openAPIOperation([]string{"wx"}, "获取 YYB 账号用户信息", nil, jsonRequestBody(refSchema("AccountRefRequest")),
 					defaulted(map[string]any{"200": jsonResponse("用户信息。", freeFormObjectSchema("用户信息结果"))})),
 			},
-			"/wx/encryptkey":     wxAliasOperation("加密能力兼容转发（需要真实 payload）", "OperateWXDataRequest", "WxappResponse"),
-			"/wx/getphonenumber": wxAliasOperation("获取手机号（兼容入口）", "WxappRequest", "WxappResponse"),
-			"/wx/cloud":          wxAliasOperation("云函数/通用 operateWxData 兼容入口", "OperateWXDataRequest", "WxappResponse"),
+			"/wx/encryptkey":       wxAliasOperation("加密能力兼容转发（需要真实 payload）", "OperateWXDataRequest", "WxappResponse"),
+			"/wx/getlatestuserkey": wxAliasOperation("getLatestUserKey 加密密钥转发（需要真实 payload）", "OperateWXDataRequest", "WxappResponse"),
+			"/wx/getphonenumber":   wxAliasOperation("获取手机号（兼容入口）", "WxappRequest", "WxappResponse"),
+			"/wx/cloud":            wxAliasOperation("云函数/通用 operateWxData 兼容入口", "OperateWXDataRequest", "WxappResponse"),
 			"/wx/qrcodeauth": map[string]any{
 				"post": openAPIOperation([]string{"qr"}, "创建二维码授权会话", nil, jsonOptionalRequestBody(refSchema("ProxySpec")),
 					defaulted(map[string]any{"200": jsonResponse("二维码授权会话。", refSchema("QRCreateResponse"))})),
@@ -552,7 +612,7 @@ func newOpenAPISpec() map[string]any {
 				}),
 				"ProxyProviderProfileRequest": objectSchema([]string{"name", "provider"}, map[string]any{
 					"name":               map[string]any{"type": "string", "maxLength": 50, "example": "巨量代理 1"},
-					"provider":           map[string]any{"type": "string", "enum": []string{"ipzan", "juliang"}, "default": "ipzan"},
+					"provider":           map[string]any{"type": "string", "enum": []string{"ipzan", "juliang", "static"}, "default": "ipzan"},
 					"proxy_type":         map[string]any{"type": "string", "enum": []string{"http", "socks5"}, "default": "http"},
 					"authorization_mode": map[string]any{"type": "string", "enum": []string{"auth", "whitelist"}, "default": "auth", "description": "auth 使用提取结果中的临时账号密码；whitelist 依赖服务器出口 IP 白名单。"},
 					"api_url":            map[string]any{"type": "string", "format": "uri", "description": "品赞配置填写包含 no 和 secret 的 core-extract HTTPS 链接。"},
@@ -562,7 +622,7 @@ func newOpenAPISpec() map[string]any {
 				"ProxyProviderProfile": objectSchema([]string{"id", "name", "provider", "proxy_type", "api_url"}, map[string]any{
 					"id":         int64Schema(),
 					"name":       map[string]any{"type": "string"},
-					"provider":   map[string]any{"type": "string", "enum": []string{"ipzan", "juliang"}},
+					"provider":   map[string]any{"type": "string", "enum": []string{"ipzan", "juliang", "static"}},
 					"proxy_type": map[string]any{"type": "string", "enum": []string{"http", "socks5"}},
 					"api_url":    map[string]any{"type": "string", "format": "uri"},
 					"created_at": int64Schema(),
@@ -770,6 +830,17 @@ func imageResponse(description string) map[string]any {
 		"content": map[string]any{
 			"image/jpeg": map[string]any{
 				"schema": map[string]any{"type": "string", "format": "binary"},
+			},
+		},
+	}
+}
+
+func htmlResponse(description string) map[string]any {
+	return map[string]any{
+		"description": description,
+		"content": map[string]any{
+			"text/html": map[string]any{
+				"schema": map[string]any{"type": "string"},
 			},
 		},
 	}

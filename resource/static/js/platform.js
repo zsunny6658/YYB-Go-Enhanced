@@ -5,6 +5,7 @@
     "/proxies": ["代理设置", "账号网络出口"],
     "/runs": ["账号调度", "脚本任务与账号日志"],
     "/users": ["用户管理", "成员与访问权限"],
+    "/account-links": ["已激活短链接", "一次性授权链接"],
     "/settings": ["个人设置", "资料与安全"]
   };
   const view = new URLSearchParams(location.search).get("view");
@@ -23,6 +24,7 @@
     test: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m13 2-9 12h7l-1 8 9-12h-7z"/></svg>',
     users: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20c.6-3.1 2.6-5 6-5s5.4 1.9 6 5"/><path d="M16 5.5a3 3 0 0 1 0 5.8M17 15c2 .5 3.3 2.1 4 5"/></svg>',
     settings: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="4"/></svg>',
+    link: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.1.1l2-2a5 5 0 0 0-7.1-7.1l-1.2 1.2"/><path d="M14 11a5 5 0 0 0-7.1-.1l-2 2A5 5 0 0 0 12 20l1.2-1.2"/></svg>',
     docs: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l3 3v15H6z"/><path d="M9 11h6M9 15h6M9 7h3"/></svg>',
     logout: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H5v14h5M14 8l4 4-4 4M9 12h9"/></svg>'
   };
@@ -39,6 +41,7 @@
     ]},
     { label: "管理", items: [
       ["/proxies", "proxy", "代理设置", true, false],
+      ["/account-links", "link", "已激活短链接", true, true],
       ["/users", "users", "用户管理", false, true],
       ["/settings", "settings", "个人设置", true, true]
     ]}
@@ -63,7 +66,7 @@
     <section class="platform-stage">
       <header class="platform-topbar">
         <div style="display:flex;align-items:center;gap:12px;min-width:0"><button class="platform-menu" id="platformMenu" type="button" aria-label="打开导航">☰</button><div class="platform-page-context"><div class="platform-breadcrumb">YYB Go / ${current[1]}</div><div class="platform-page-title">${current[0]}</div></div></div>
-        <div class="platform-user"><div class="platform-user-copy"><strong id="platformUserName">正在读取</strong><span id="platformUserRole">当前用户</span></div><span class="platform-avatar" id="platformAvatar">Y</span></div>
+        <div class="platform-user"><a class="platform-build" id="platformBuild" href="https://github.com/525815266/YYB-Go-Enhanced/releases" target="_blank" rel="noreferrer" title="正在读取版本信息"><span>当前版本</span><strong>读取中</strong></a><div class="platform-user-copy"><strong id="platformUserName">正在读取</strong><span id="platformUserRole">当前用户</span></div><span class="platform-avatar" id="platformAvatar">Y</span></div>
       </header>
       <div class="platform-main"></div>
     </section>`;
@@ -76,6 +79,23 @@
   document.getElementById("platformOverlay").onclick = closeNav;
   shell.querySelectorAll(".platform-nav a").forEach(link => link.addEventListener("click", closeNav));
   document.getElementById("platformLogout").onclick = async () => { await fetch("/logout", { method: "POST" }); location.href = "/login"; };
+
+  fetch("/api/version").then(async response => {
+    const body = await response.json();
+    if (!response.ok || body.code !== 0) throw new Error(body.msg || "读取版本失败");
+    const info = body.data || {};
+    const version = info.version || "dev";
+    const build = document.getElementById("platformBuild");
+    build.querySelector("strong").textContent = `v${version}`;
+    build.querySelector("span").textContent = "当前版本";
+    build.href = info.update_url || build.href;
+    build.title = `当前版本 v${version}`;
+  }).catch(() => {
+    const build = document.getElementById("platformBuild");
+    build.querySelector("strong").textContent = "未知";
+    build.querySelector("span").textContent = "当前版本";
+    build.title = "无法读取版本信息";
+  });
 
   fetch("/api/auth/me").then(async response => {
     if (response.status === 401) {

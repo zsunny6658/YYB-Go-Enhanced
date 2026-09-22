@@ -2,12 +2,19 @@
 
 主要功能变化请查看 [更新日志](CHANGELOG.md)。
 
+登录后的控制台顶栏会显示正式语义版本号，例如 `v0.2.8`；点击版本标识可进入发布页核对是否需要更新。项目版本统一记录在根目录 `VERSION`，Docker、Magisk 和源码构建共用同一个版本号。
+
+代理设置中的“静态代理预设”可保存长期使用的固定出口，之后在账号代理配置中直接选择，不必重复粘贴 `user:pass@host:port`。短效 API 代理仍明确标记为不可用于账号保活。
+
 应用宝协议服务增强版，提供微信扫码登录、账号与 OpenID 管理、`wx.login` code 获取、凭据按需续期、带用户权限的 Web 控制台，以及 Docker 和面板接入。
 
 ## 功能
 
 - 默认使用手机扫码添加账号，授权成功后显示账号 ID、OpenID 和存活状态；实验性本机微信快速授权默认关闭
 - 扫码成功后可填写账号备注，并一键合并到面板 `YYB_SERVER`，重复操作不会产生重复账号
+- 可为选中账号生成一次性扫码授权链接：更新链接只接受同一 OpenID，新增链接只接受系统中尚不存在的 YYB 账号；链接支持有效期并在成功使用后立即失效
+- 管理分类新增“已激活短链接”：普通用户只管理自己的授权链接，管理员可查看全部；支持状态/类型筛选、复制打开、作废和删除；生成链接前会拦截同范围未消费链接，避免重复占用资源
+- 授权链接与二维码会话分开计时：二维码过期或刷新页面只重新生成二维码，不消耗授权链接；手机误打开后可在电脑继续打开同一链接，直到成功授权或链接到期
 - Web 控制台支持配置 **青龙面板** 与 **呆呆面板 (daidai-panel)** OpenAPI，支持自动识别与测试连接，且不会回传 Secret 明文
 - Web 控制台管理账号并复制 OpenID
 - 每个微信账号可独立选择直连、静态代理、动态代理 API，或命名的品赞/巨量供应商配置；支持按账号选择省市、HTTP CONNECT、SOCKS5、代理认证以及 `txt`、`json`、`json2` 响应
@@ -23,6 +30,9 @@
 - 账号运行管理：每个微信账号独立创建、启停和运行青龙脚本，并查看日志
 - 运行日志使用独立抽屉连续刷新，保持阅读位置；支持超过 2 MB 的青龙日志索引响应
 - 账号独立推送：支持 Server酱、PushPlus 和企业微信机器人，密钥只保存在青龙环境变量
+- `scripts/` 统一收录业务脚本和 136 个 YYB 多账号适配脚本；已去重并脱离上游自动订阅，避免更新覆盖兼容修复
+
+授权短链接的历史 URL 使用 `YYB_ACCOUNT_LINK_KEY` 做 AES-GCM 加密保存。生产环境请设置随机长字符串并在升级时保持不变；不设置时会由管理员初始化配置派生兼容密钥。
 
 账号队列中的“一键整理”仅供管理员使用。系统先列出候选记录，点击确认后才会清理明确没有 `login_buffer`、凭据且未绑定用户的扫码残留；该操作不会删除正常账号或已过期账号。另有“压缩账号 ID”功能，可预览并将现有账号按当前顺序迁移到连续的 `1..N`，同时迁移会话、代理、推送、脚本任务和用户归属，并尝试同步青龙 `YYB_SERVER`；不会删除账号内容。释放的 ID 会在后续成功扫码时自动复用。扫码页刷新二维码和返回时会取消旧会话，避免旧二维码的延迟请求再次写入账号。
 
@@ -31,9 +41,12 @@
 ![账号控制台与青龙连接设置](docs/images/account-console.png)
 
 <p align="center">
+  <img src="docs/images/account-lifecycle-demo.svg" alt="移动端账号生命周期与保活状态演示" width="540">
   <img src="docs/images/scan-sync-mobile.png" alt="扫码成功后一键添加到青龙" width="360">
   <img src="docs/images/account-runs-mobile.png" alt="带账号备注的运行日志" width="360">
 </p>
+
+打开 [GitHub Pages 交互演示](https://525815266.github.io/YYB-Go-Enhanced/) 查看纯静态 Demo。页面使用全部虚构的账号、OpenID、代理和时间数据，不会连接真实服务；也可通过 [HTMLPreview 备用入口](https://htmlpreview.github.io/?https://github.com/525815266/YYB-Go-Enhanced/blob/main/docs/demo/index.html) 访问。
 
 ## Docker Compose 部署
 
@@ -80,7 +93,7 @@ YYB_AUTH_DSN=yyb_go:数据库密码@tcp(mysql:3306)/yyb_go?charset=utf8mb4&parse
 
 ## Magisk 模块
 
-Android ARM64 设备可从 [Releases](https://github.com/525815266/YYB-Go-Enhanced/releases) 安装最新版 Magisk 模块。模块由 `late_start service` 开机常驻运行，不依赖 Termux；默认控制台为 `http://127.0.0.1:8000`，账号和配置持久化在 `/data/adb/yyb-go`。v0.1.4 已通过官方 Magisk 真机安装、进入控制台和扫码验证。
+Android ARM64 设备可从 [Releases](https://github.com/525815266/YYB-Go-Enhanced/releases) 安装最新版 Magisk 模块。模块由 `late_start service` 开机常驻运行，不依赖 Termux；默认控制台为 `http://127.0.0.1:8000`，账号和配置持久化在 `/data/adb/yyb-go`。v0.2.0 合入新版保活与多账号隔离：临时网络、代理或 DNS 错误不会再误报账号失效，只有微信明确拒绝 refresh token 时才提示重扫。
 
 模块目前只提供 ARM64 构建，不支持 32 位 Android。需要让青龙或呆呆面板访问手机服务时，必须在 `/data/adb/yyb-go/config.conf` 中配置局域网监听和面板地址；不要把端口暴露到公网。完整安装、升级、DNS 和局域网配置见 [Magisk 模块文档](docs/magisk.md)。
 
@@ -90,6 +103,10 @@ Android ARM64 设备可从 [Releases](https://github.com/525815266/YYB-Go-Enhanc
 - 后续注册账号默认为普通用户，可使用工作台、扫码添加和管理本人微信账号、本人代理与账号级脚本任务，并可修改个人资料、密码和管理自己的会话。
 - 管理员可查看和管理全部微信账号、扫码、协议调试、面板连接与全量同步、运行管理和用户管理，并可关闭公开注册；管理员查看用户账号为只读，不会切换用户会话。
 - `/wx/*`、`/wxapp/*` 保持给青龙脚本调用，不要求浏览器 Cookie；不要直接将这些协议接口暴露到公网。
+
+如必须通过公网访问协议接口，请设置 `YYB_PROTOCOL_TOKEN`，并让脚本在请求中携带 `Authorization: Bearer <token>`。设置后 `/wx/*`、`/wxapp/*` 的所有自动化调用都会校验该令牌，避免“服务地址@数字 ID”被扫描后直接调用。未设置时保持旧版兼容行为，仍应只在内网或可信反代后使用。
+
+面板同步默认沿用数字 ID 以兼容旧脚本；设置 `YYB_QINGLONG_REF_MODE=openid` 后，一键同步会写入 `地址@OpenID`，账号删除、重排不会影响外部引用。重新设为 `id` 即可切回数字 ID。
 - 修改密码会注销该用户的其他会话；管理员重置密码或停用用户会注销该用户全部会话。
 
 ### GitHub Actions 自动与手动构建镜像
@@ -102,7 +119,11 @@ Android ARM64 设备可从 [Releases](https://github.com/525815266/YYB-Go-Enhanc
 - **失败恢复**：代码拉取、QEMU 初始化、Buildx 启动、GHCR 登录及镜像构建推送均最多重试 3 次；镜像标签由工作流直接生成，不依赖需要在 Set up job 下载的第三方 Action。
 - **发布校验**：Docker 构建会先执行 `go test ./...`，测试失败时不会生成或推送镜像。
 
-Magisk 模块使用独立的 `Build Magisk Module` Workflow：主分支每次提交都会编译并校验 ARM64 安装包；推送 `magisk-v0.1.5` 这类标签时，会自动创建对应 Release 并上传 ZIP。也可在 Actions 页面手动填写版本并选择是否发布 Release。Docker 与 Magisk 为两条独立任务，一方失败不会阻塞另一方。
+Magisk 模块使用独立的 `Build Magisk Module` Workflow：服务端、运行前端资源或 Magisk 打包文件变更时会编译并校验 ARM64 安装包；推送 `magisk-v0.2.0` 这类标签时，会自动创建对应 Release 并上传 ZIP。也可在 Actions 页面手动填写版本并选择是否发布 Release。Docker 与 Magisk 为两条独立任务，一方失败不会阻塞另一方。
+
+Docker 镜像只在服务端代码、运行资源、Go 依赖、Docker 构建文件或对应 workflow 变更时构建；`scripts/**`、README 和普通文档更新不会再触发镜像更新提示。Magisk 只在服务端代码、运行前端资源、打包文件、Go 依赖或对应 workflow 变更时构建。这样脚本发布不会伪装成 Docker/Magisk 版本更新，但核心服务提交仍会自动验证和构建。
+
+同一 YYB 账号的 `wx.login` 取码请求会按账号串行化，避免两个青龙任务同时刷新/消费同一账号的短期 code；不同账号仍可并发执行。`wx.login` code 本身仍是一次性短期凭据，不能在脚本之间复用。
 
 ## 本机微信快速授权（实验性）
 
@@ -167,6 +188,27 @@ YYB_KEEPALIVE_AHEAD=45m
 
 ## 青龙、呆呆与 Arcadia 面板接入
 
+### 脚本部署在另一台服务器：返回登录页怎么办？
+
+控制台密码保护管理页面；`POST /wxapp/getCode` 和 `POST /wx/code` 不依赖浏览器 Cookie，也不按调用方是否同机区别处理。只打开 `http://服务器IP:8000/` 显示登录页是正常的，根路径不是取码接口。采用本仓库脚本时，`YYB_SERVER` 每行填写 `http://YYB服务器IP:8000@账号ID`，不要带 `/login`、`?ref=...` 或重复的接口路径。
+
+请在**实际执行脚本的容器内**检查下面两个请求（地址换成你的 YYB 地址）：
+
+```bash
+curl -i --max-time 10 http://YYB服务器IP:8000/health
+curl -i --max-time 10 -X POST http://YYB服务器IP:8000/wxapp/getCode \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+预期分别为 `200` JSON 和 `400` JSON（`ref is required`）；第二个请求只验证路由，不实际生成 code。正式请求体是 `{"ref":"账号ID","app_id":"目标小程序AppID"}`。异机部署不能使用另一台机器的 Docker 容器名 `yyb-go` 或 `127.0.0.1`。
+
+- `303` / `302` 跳转 `/login` 或最终收到 HTML：检查脚本最终请求 URL、旧版本及反向代理路径改写。诊断时不要添加 `curl -L`，避免自动跟随跳转隐藏原因。
+- `404` JSON：接口路径不匹配，注意 `getCode` 大小写；`405` JSON：取码应使用 POST。
+- `401` JSON 来自 `/accounts` 等管理接口：这类接口仍需要网页登录，脚本读取备注失败应独立处理，不要阻断公共取码流程。
+- 直连端口正常、域名返回登录页：检查外层反代的 Basic Auth、统一登录或路径前缀；应用密码不会绕过外层认证。
+
+无需为了异机调用关闭控制台登录。公共协议接口应限制在可信内网、VPN 或调用服务器 IP 白名单内；控制台密码本身不保护这些公共取码接口。
+
 支持对接 **青龙面板 (Qinglong)**、**呆呆面板 (daidai-panel)** 与 **Arcadia**：
 
 - **Web 控制台配置**：可在 Web 控制台的“面板连接设置”中选择【青龙面板】或【呆呆面板 (daidai-panel)】，填入面板地址与对应的鉴权凭据（青龙使用 `Client ID` / `Client Secret`；呆呆面板使用 `App Key` / `App Secret`）。配置会持久化到 SQLite 数据库并优先于容器环境变量。
@@ -213,7 +255,29 @@ YYB_SERVER=yyb-go:8000@1
 YYB_SERVER=yyb-go:8000@owNAxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
+`POST /wx/oauth` 只负责生成微信公众号网页授权链接，响应中的 `code` 在授权前固定为 `null`。用户必须在微信内打开 `full_url` 并同意授权，微信随后才会请求你填写的 `redirect_uri?code=...&state=...`；请在自己的回调页面读取这两个查询参数。YYB Go 无法替第三方公众号提前生成或截取该一次性 code。
+
 已确认报错的青龙/呆呆面板脚本修复版收录在 [`scripts/`](scripts/README.md)。
+
+### YYB 账号公共状态缓存
+
+`scripts/yyb_account_guard.py` 与 `scripts/yyb-account-guard.js` 为所有青龙
+YYB 脚本提供共享的账号状态缓存，默认写入 `/ql/data/config/yyb_account_status.json`。
+已接入爱玛、极兔、比亚迪海洋、都市甜心、DT 生活和慕斯脚本：明确的“未授权手机号、
+未注册会员、未绑定小程序”等业务响应会冷却该账号，后续任务直接跳过并继续下一个；
+超时、502/503、风控、活动太火爆、登录过期和 token 失效不会被误判为永久未注册。
+
+青龙中新增 `YYB账号状态检查.py`（建议 `17 */12 * * *`）维护缓存。由于开启网页登录
+认证后 `/accounts` 不能被青龙匿名读取，该任务只探测 YYB `/healthz` 并清理不在
+`YYB_SERVER` 的缓存条目，不调用业务小程序接口，不产生未消费的 `wx.login code`。需要执行
+手机号授权/自动注册流程的脚本可设置 `YYB_GUARD_BYPASS=1` 临时绕过公共过滤。
+
+可选环境变量：
+
+```dotenv
+YYB_ACCOUNT_STATUS_FILE=/ql/data/config/yyb_account_status.json
+YYB_GUARD_BYPASS=0
+```
 
 ### 金茂悦积分兑换与充电
 
@@ -240,6 +304,7 @@ JMY_EXCHANGE_THRESHOLD=1000
 /wx/code             获取小程序 code
 /wx/getuserinfo      获取 YYB 账号用户信息
 /wx/encryptkey       加密能力兼容转发（需要真实 payload）
+/wx/getlatestuserkey getLatestUserKey 加密密钥转发（需要真实 payload）
 /wx/getphonenumber   获取手机号
 /wx/cloud            云函数（通过 operateWxData 传递 payload）
 /wx/qrcodeauth       二维码授权会话
@@ -248,7 +313,7 @@ JMY_EXCHANGE_THRESHOLD=1000
 /wx/appmsglike       文章点赞（通过 operateWxData 传递 payload）
 ```
 
-这些接口不会伪造微信返回值。`/wx/encryptkey`、`/wx/cloud`、`/wx/mpgeta8key`、`/wx/appmsgext` 和 `/wx/appmsglike` 都是 `operateWxData` 兼容转发，调用方必须在 `payload` 中提供目标业务真实使用的 `api_name`、`data` 等字段，例如：
+这些接口不会伪造微信返回值。`/wx/encryptkey`、`/wx/getlatestuserkey`、`/wx/cloud`、`/wx/mpgeta8key`、`/wx/appmsgext` 和 `/wx/appmsglike` 都是 `operateWxData` 兼容转发，调用方必须在 `payload` 中提供目标业务真实使用的 `api_name`、`data` 等字段，例如：
 
 ```json
 {
@@ -260,6 +325,11 @@ JMY_EXCHANGE_THRESHOLD=1000
   }
 }
 ```
+
+微信客户端名称 `wx.getUserCryptoManager().getLatestUserKey()` 对应微信协议层的
+`getUserEncryptKey`。因此 `/wx/getlatestuserkey` 只是便捷别名；如果 payload 中写入
+`api_name: "getLatestUserKey"`，YYB 会自动改成服务端名称，其他字段原样保留。返回结果中的
+`encryptKey`、`iv`、`version`、`expireTime` 是否存在，取决于微信账号、目标小程序和基础库，服务端不会自行生成或伪造这些值。
 
 `payload` 会原样传给微信协议层，路由名称不会自动生成目标业务参数。文章会话接口不能只根据文章 URL 推导 `api_name`、会话或点赞参数；需要抓取 PC 微信调用 `operateWxData` 时的原始请求体，而不是文章最终 HTTP 请求。
 

@@ -105,6 +105,21 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value      TEXT NOT NULL,
     updated_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS account_links (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash      TEXT    NOT NULL UNIQUE,
+    kind            TEXT    NOT NULL,
+    account_id      INTEGER NOT NULL REFERENCES wechat_accounts(id) ON DELETE CASCADE,
+    owner_user_id   INTEGER,
+    expected_openid TEXT    NOT NULL DEFAULT '',
+    token_ciphertext TEXT   NOT NULL DEFAULT '',
+    expires_at      INTEGER NOT NULL,
+    used_at         INTEGER,
+    revoked_at      INTEGER,
+    created_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_account_links_expires ON account_links(expires_at);
 `
 
 var defaultFeatures = []Feature{
@@ -144,6 +159,8 @@ type AccountPublic struct {
 	Avatar                 *string `json:"avatar"`
 	Status                 *string `json:"status"`
 	RefreshTokenObservedAt *int64  `json:"refresh_token_observed_at,omitempty"`
+	CredentialExpiresAt    *int64  `json:"credential_expires_at,omitempty"`
+	CredentialExpiresIn    int64   `json:"credential_expires_in,omitempty"`
 	RescanRecommended      bool    `json:"rescan_recommended"`
 	LastCheckedAt          *int64  `json:"last_checked_at"`
 	CreatedAt              int64   `json:"created_at"`
@@ -207,12 +224,35 @@ func Open(path string) (*DB, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err = migrateAccountLinks(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	out := &DB{sql: db}
 	if err = out.EnsureDefaultFeatures(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return out, nil
+}
+
+func migrateAccountLinks(ctx context.Context, db *sql.DB) error {
+	for _, column := range []struct{ name, definition string }{
+		{"token_ciphertext", "TEXT NOT NULL DEFAULT ''"},
+		{"revoked_at", "INTEGER"},
+	} {
+		exists, err := sqliteColumnExists(ctx, db, "account_links", column.name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err = db.ExecContext(ctx, "ALTER TABLE account_links ADD COLUMN "+column.name+" "+column.definition); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (db *DB) Close() error {
@@ -599,6 +639,7 @@ func (db *DB) CompactAccountIDs(ctx context.Context) (map[int64]int64, error) {
 		{"account_script_jobs", "account_id"},
 		{"account_push_settings", "account_id"},
 		{"account_proxy_settings", "account_id"},
+		{"account_links", "account_id"},
 	}
 	for oldID := range mapping {
 		for _, child := range childTables {
@@ -692,6 +733,13 @@ func (db *DB) SetAccountCredentialStatus(ctx context.Context, id int64, loginBuf
 
 func (db *DB) SetAccountStatus(ctx context.Context, id int64, status string) error {
 	now := time.Now().Unix()
+	if status == "expired" {
+		_, err := db.sql.ExecContext(ctx,
+			"UPDATE wechat_accounts SET login_buffer='', credentials=NULL, status=?, last_checked_at=?, updated_at=? WHERE id=?",
+			status, now, now, id,
+		)
+		return err
+	}
 	_, err := db.sql.ExecContext(ctx,
 		"UPDATE wechat_accounts SET status=?, last_checked_at=?, updated_at=? WHERE id=?",
 		status, now, now, id,
@@ -808,10 +856,32 @@ func (db *DB) GetFeatureByName(ctx context.Context, name string) (*Feature, erro
 func (a *WechatAccount) Public() AccountPublic {
 	var refreshTokenObservedAt *int64
 	rescanRecommended := false
+	var credentialExpiresAt *int64
+	credentialExpiresIn := int64(0)
+	credentialExpiresAtValue := int64Credential(a.Credentials, "expires_at")
+	credentialExpiresIn = int64Credential(a.Credentials, "expires_in")
+	if credentialExpiresIn <= 0 {
+		credentialExpiresIn = 7200
+	}
 	if stringCredential(a.Credentials, "refreshtoken") != "" {
 		if observedAt := int64Credential(a.Credentials, "refresh_token_observed_at"); observedAt > 0 {
 			refreshTokenObservedAt = &observedAt
 			rescanRecommended = time.Now().Unix()-observedAt >= int64((25*24*time.Hour)/time.Second)
+		}
+	}
+	if credentialExpiresAtValue <= 0 {
+		if refreshedAt := int64Credential(a.Credentials, "refresh_refreshed_at"); refreshedAt > 0 {
+			credentialExpiresAtValue = refreshedAt + credentialExpiresIn
+		}
+	}
+	if credentialExpiresAtValue > 0 {
+		expiresAt := credentialExpiresAtValue
+		credentialExpiresAt = &expiresAt
+		// A transient refresh failure is kept as unknown for retry purposes, but
+		// once the cached credential is past its expiry the UI should still guide
+		// the operator to rescan instead of leaving the account looking healthy.
+		if !rescanRecommended && (a.Status == nil || strings.EqualFold(strings.TrimSpace(*a.Status), "unknown")) && expiresAt <= time.Now().Unix() {
+			rescanRecommended = true
 		}
 	}
 	return AccountPublic{
@@ -824,6 +894,8 @@ func (a *WechatAccount) Public() AccountPublic {
 		Avatar:                 a.Avatar,
 		Status:                 a.Status,
 		RefreshTokenObservedAt: refreshTokenObservedAt,
+		CredentialExpiresAt:    credentialExpiresAt,
+		CredentialExpiresIn:    credentialExpiresIn,
 		RescanRecommended:      rescanRecommended,
 		LastCheckedAt:          a.LastCheckedAt,
 		CreatedAt:              a.CreatedAt,

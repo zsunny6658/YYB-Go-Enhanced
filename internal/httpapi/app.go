@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -42,10 +43,14 @@ type Config struct {
 	QingLongSecret    string
 	QingLongServer    string
 	QingLongRepo      string
+	QingLongRefMode   string
 	AuthDriver        string
 	AuthDSN           string
 	AuthMySQLDSN      string
 	IntegrationToken  string
+	// ProtocolToken protects the legacy /wx* and /wxapp/* automation routes
+	// when the service is reachable outside a trusted private network.
+	ProtocolToken     string
 	AdminUser         string
 	AdminPassword     string
 	CookieSecure      bool
@@ -78,9 +83,13 @@ type App struct {
 	proxyLeaseLocks   map[int64]*sync.Mutex
 	keepAliveRetryMu  sync.Mutex
 	keepAliveRetryAt  map[int64]time.Time
+	panelSyncMu       sync.Mutex
+	accountLinkMu     sync.Mutex
 
-	keepAliveCancel context.CancelFunc
-	keepAliveDone   chan struct{}
+	keepAliveCancel   context.CancelFunc
+	keepAliveDone     chan struct{}
+	accountLinkCancel context.CancelFunc
+	accountLinkDone   chan struct{}
 }
 
 var swaggerDocsHandler = httpSwagger.Handler(
@@ -209,6 +218,7 @@ func NewApp(cfg Config) (*App, error) {
 		app.auth = authStore
 	}
 	app.startKeepAlive()
+	app.startAccountLinkCleanup()
 	return app, nil
 }
 
@@ -217,6 +227,9 @@ func (a *App) Close() error {
 		a.keepAliveCancel()
 		<-a.keepAliveDone
 		a.keepAliveCancel = nil
+	}
+	if a.accountLinkCancel != nil {
+		a.stopAccountLinkCleanup()
 	}
 	if a.db != nil {
 		if a.auth != nil {
@@ -256,6 +269,7 @@ func (a *App) Handler() http.Handler {
 	router.Any("/wx/code", gin.WrapF(a.handleWXCodeAlias))
 	router.Any("/wx/getuserinfo", gin.WrapF(a.handleWXGetUserInfo))
 	router.Any("/wx/encryptkey", gin.WrapF(a.handleWXEncryptKey))
+	router.Any("/wx/getlatestuserkey", gin.WrapF(a.handleWXLatestUserKey))
 	router.Any("/wx/getphonenumber", gin.WrapF(a.handleWXPhoneAlias))
 	router.Any("/wx/cloud", gin.WrapF(a.handleWXCloud))
 	router.Any("/wx/qrcodeauth", gin.WrapF(a.handleQRRoot))
@@ -264,17 +278,31 @@ func (a *App) Handler() http.Handler {
 	router.Any("/wx/appmsgext", gin.WrapF(a.handleWXAppMsgExt))
 	router.Any("/wx/appmsglike", gin.WrapF(a.handleWXAppMsgLike))
 	router.Any("/openapi.json", gin.WrapF(a.handleOpenAPI))
+	router.GET("/integration/module-manifest.json", gin.WrapF(a.handleIntegrationManifest))
+	router.GET("/integration/accounts", gin.WrapF(a.handleIntegrationAccounts))
+	router.GET("/integration/accounts/proxy", gin.WrapF(a.handleIntegrationAccountProxy))
+	router.POST("/integration/actions/get-code", gin.WrapF(a.handleIntegrationGetCode))
+	router.POST("/integration/actions/refresh-account", gin.WrapF(a.handleIntegrationRefreshAccount))
+	// Bearer-style one-time account links are intentionally public. The token
+	// itself is a random secret; all management and link creation APIs remain
+	// behind the browser session middleware below.
+	router.Any("/account-link/:token", gin.WrapF(a.handleAccountLinkPage))
+	router.Any("/account-link/:token/*path", gin.WrapF(a.handleAccountLink))
 
 	router.Use(a.requireBrowserSession())
 	router.Any("/settings", gin.WrapF(a.handleSettingsPage))
 	router.Any("/users", gin.WrapF(a.handleUsersPage))
 	router.Any("/api/auth/me", gin.WrapF(a.handleAuthMe))
+	router.GET("/api/version", gin.WrapF(a.handleVersion))
 	router.Any("/api/auth/profile", gin.WrapF(a.handleProfile))
 	router.Any("/api/auth/password", gin.WrapF(a.handlePassword))
 	router.Any("/api/auth/sessions", gin.WrapF(a.handleSessions))
 	router.Any("/api/auth/users", gin.WrapF(a.handleUsers))
 	router.Any("/api/auth/users/*path", gin.WrapF(a.handleUserAction))
 	router.Any("/api/auth/registration", gin.WrapF(a.handleRegistrationSetting))
+	router.Any("/api/account-links", gin.WrapF(a.handleAccountLinksAPI))
+	router.Any("/api/account-links/*path", gin.WrapF(a.handleAccountLinksAPI))
+	router.Any("/account-links", gin.WrapF(a.handleAccountLinksPage))
 	router.Any("/", gin.WrapF(a.handleIndex))
 	router.Any("/scan", gin.WrapF(a.handleScan))
 	router.Any("/proxies", gin.WrapF(a.handleProxiesPage))
@@ -294,6 +322,7 @@ func (a *App) Handler() http.Handler {
 	router.Any("/accounts/refresh", gin.WrapF(a.handleAccountRefresh))
 	router.Any("/accounts/resync", gin.WrapF(a.handleAccountResync))
 	router.Any("/accounts/remark", gin.WrapF(a.handleAccountRemark))
+	router.Any("/accounts/status", gin.WrapF(a.handleAccountStatus))
 	router.Any("/accounts/proxy", gin.WrapF(a.handleAccountProxy))
 	router.Any("/accounts/proxy/test", gin.WrapF(a.handleAccountProxyTest))
 	router.Any("/api/proxy-profiles", gin.WrapF(a.handleProxyProfiles))
@@ -317,6 +346,14 @@ func (a *App) Handler() http.Handler {
 	})
 
 	return router
+}
+
+func (a *App) handleAccountLinksPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	serveFileOrText(w, r, filepath.Join(a.resources.Templates, "account-links.html"), fallbackAccountLinksHTML)
 }
 
 func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -514,7 +551,7 @@ func (a *App) handleQR(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "qr session not found")
 			return
 		}
-		result, err := login.Client.GetLoginBuffer(r.Context(), login.Session)
+		result, err := a.getLoginBufferWithRetry(r.Context(), login)
 		if err != nil {
 			writeError(w, http.StatusConflict, "buffer not ready: "+err.Error())
 			return
@@ -567,6 +604,7 @@ func (a *App) handleQR(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "保存账号代理失败: "+err.Error())
 			return
 		}
+		a.autoSyncAfterScan(acc)
 		dropAfterConfirm = true
 		writeJSON(w, http.StatusOK, acc.Public())
 	default:
@@ -728,6 +766,12 @@ func (a *App) handleWXEncryptKey(w http.ResponseWriter, r *http.Request) {
 	a.handleNamedWXOperation(w, r, "/wx/encryptkey", "getUserEncryptKey", true)
 }
 
+// handleWXLatestUserKey exposes the client-side getLatestUserKey name while
+// forwarding the corresponding server-side getUserEncryptKey operation.
+func (a *App) handleWXLatestUserKey(w http.ResponseWriter, r *http.Request) {
+	a.handleNamedWXOperation(w, r, "/wx/getlatestuserkey", "getUserEncryptKey", true)
+}
+
 func (a *App) handleWXCloud(w http.ResponseWriter, r *http.Request) {
 	a.handleNamedWXOperation(w, r, "/wx/cloud", "cloud.callFunction", true)
 }
@@ -797,11 +841,42 @@ func (a *App) invokeNamedWXOperation(ctx context.Context, body wxappRequest, api
 	if body.Payload == nil {
 		body.Payload = map[string]any{"api_name": apiName, "data": map[string]any{}, "env": 1}
 	}
+	if apiName == "getUserEncryptKey" {
+		body.Payload = normalizeEncryptKeyPayload(body.Payload)
+	}
 	result, err := a.invokeWXApp(ctx, acc, body.AppID, body.Payload, a.invokeOperateWXData)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{"openid": acc.OpenID, "result": result}, nil
+}
+
+// normalizeEncryptKeyPayload accepts the client API spelling used by
+// wx.getUserCryptoManager().getLatestUserKey(). The iLink server operation is
+// named getUserEncryptKey; only the operation name is adapted and all business
+// data is preserved unchanged.
+func normalizeEncryptKeyPayload(payload map[string]any) map[string]any {
+	if payload == nil {
+		return nil
+	}
+	out := make(map[string]any, len(payload))
+	for key, value := range payload {
+		out[key] = value
+	}
+	if name, ok := out["api_name"].(string); ok && name == "getLatestUserKey" {
+		out["api_name"] = "getUserEncryptKey"
+	}
+	if nested, ok := out["data"].(map[string]any); ok {
+		copyNested := make(map[string]any, len(nested))
+		for key, value := range nested {
+			copyNested[key] = value
+		}
+		if name, ok := copyNested["api_name"].(string); ok && name == "getLatestUserKey" {
+			copyNested["api_name"] = "getUserEncryptKey"
+		}
+		out["data"] = copyNested
+	}
+	return out
 }
 
 func (a *App) handleWXGetUserInfo(w http.ResponseWriter, r *http.Request) {
@@ -881,6 +956,9 @@ type wxappRequest struct {
 type wxappCall func(ctx context.Context, acc *store.WechatAccount, appID string, payload map[string]any, proxyValue string, fallbackDirect bool) (map[string]any, error)
 
 func (a *App) callWXApp(w http.ResponseWriter, r *http.Request, requirePayload bool, call wxappCall) {
+	if !a.authorizeProtocol(w, r) {
+		return
+	}
 	var body wxappRequest
 	if err := decodeOptionalJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -923,6 +1001,22 @@ func (a *App) callWXApp(w http.ResponseWriter, r *http.Request, requirePayload b
 		},
 		"result": result,
 	})
+}
+
+// authorizeProtocol is opt-in for backwards compatibility. When configured,
+// every automation request must carry the token; this prevents a public
+// YYB_SERVER address plus a numeric account id from being abused by scanners.
+func (a *App) authorizeProtocol(w http.ResponseWriter, r *http.Request) bool {
+	expected := strings.TrimSpace(a.cfg.ProtocolToken)
+	if expected == "" {
+		return true
+	}
+	provided := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
+		writeError(w, http.StatusUnauthorized, "invalid protocol token")
+		return false
+	}
+	return true
 }
 
 func decodeOptionalJSON(r *http.Request, dst any) error {
@@ -1107,7 +1201,7 @@ func (a *App) storeFromScan(ctx context.Context, loginBuffer string, creds proto
 	nick := pickNickname(userInfo, creds.Nickname)
 	avatar := a.resolveAvatar(ctx, openid, userInfo)
 	status := "alive"
-	return a.db.UpsertAccount(ctx, openid, loginBuffer, stringPtrMaybe(nick), stringPtrMaybe(nick), stringPtrMaybe(avatar), userInfo, creds.ToMap(), &status)
+	return a.db.UpsertAccount(ctx, openid, loginBuffer, stringPtrMaybe(nick), stringPtrMaybe(nick), stringPtrMaybe(avatar), userInfo, creds.ToMapForScan(), &status)
 }
 
 func (a *App) resyncProfile(ctx context.Context, acc *store.WechatAccount) (*store.WechatAccount, error) {
@@ -1128,6 +1222,9 @@ func (e accountExpiredError) Error() string { return "account expired: " + e.ope
 
 func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID string, payload map[string]any, call wxappCall) (map[string]any, error) {
 	if accountStatus(acc) == "expired" {
+		return nil, accountExpiredError{openid: acc.OpenID}
+	}
+	if accountNeedsRescan(acc) {
 		return nil, accountExpiredError{openid: acc.OpenID}
 	}
 	proxyValue, fallbackDirect, err := a.resolveAccountProxy(ctx, acc.ID)
@@ -1154,6 +1251,17 @@ func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID s
 		acc = fresh
 	}
 	return call(ctx, acc, appID, payload, proxyValue, fallbackDirect)
+}
+
+// accountNeedsRescan covers accounts whose refresh attempt was inconclusive
+// but whose cached credential has already expired. They must not be sent into
+// every script invocation until the user scans again.
+func accountNeedsRescan(acc *store.WechatAccount) bool {
+	if acc == nil || accountStatus(acc) != "unknown" || acc.Credentials == nil {
+		return false
+	}
+	expiresAt := protocol.CredentialsFromMap(acc.Credentials).ExpiresAt
+	return expiresAt > 0 && expiresAt <= time.Now().Unix()
 }
 
 func (a *App) invokeGetCode(ctx context.Context, acc *store.WechatAccount, appID string, _ map[string]any, proxyValue string, fallbackDirect bool) (map[string]any, error) {

@@ -3,10 +3,12 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"yyb_go/internal/store"
 )
@@ -279,9 +281,6 @@ func validatePanelConfig(panelType, baseURL, clientID, secret string) error {
 }
 
 func (a *App) handleQingLongSync(w http.ResponseWriter, r *http.Request) {
-	if a.auth != nil && !requireAdmin(w, r) {
-		return
-	}
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -304,9 +303,41 @@ func (a *App) handleQingLongSync(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	responseValue := any(value)
+	if a.auth != nil {
+		user := a.browserUser(r)
+		if user == nil || user.Role != "admin" {
+			// The panel variable is shared by all accounts. Ordinary users may
+			// sync their own account, but must not receive other users' entries.
+			responseValue = nil
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"account": acc.Public(), "name": "YYB_SERVER", "value": value, "added": added,
+		"account": acc.Public(), "name": "YYB_SERVER", "value": responseValue, "added": added,
 	})
+}
+
+// autoSyncAfterScan reconciles a newly added or rescanned account in the
+// configured automation panel. Panel synchronization is a side effect of QR
+// authorization: a panel outage must never turn a successful scan into an
+// error or require the user to repeat the authorization.
+func (a *App) autoSyncAfterScan(acc *store.WechatAccount) {
+	if acc == nil || !a.qinglong.configured() {
+		return
+	}
+	go func(account *store.WechatAccount) {
+		timeout := a.cfg.RequestTimeout * 2
+		if timeout < 10*time.Second {
+			timeout = 10 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		a.panelSyncMu.Lock()
+		defer a.panelSyncMu.Unlock()
+		if _, _, err := a.syncAccountToQingLong(ctx, account); err != nil {
+			log.Printf("[auto-sync] account %d panel sync failed: %v", account.ID, err)
+		}
+	}(acc)
 }
 
 // handleQingLongSyncAll reconciles every locally stored account into the
@@ -350,7 +381,7 @@ func (a *App) handleQingLongSyncAll(w http.ResponseWriter, r *http.Request) {
 	added := 0
 	for _, acc := range accounts {
 		var changed bool
-		value, changed = mergeYYBServerValue(value, a.cfg.QingLongServer, acc)
+		value, changed = mergeYYBServerValue(value, a.cfg.QingLongServer, acc, a.cfg.QingLongRefMode)
 		if changed {
 			added++
 		}
@@ -384,7 +415,7 @@ func (a *App) syncAccountToQingLong(ctx context.Context, acc *store.WechatAccoun
 		return "", false, err
 	}
 	remarks = managedYYBServerRemarks(remarks, accounts)
-	value, added := mergeYYBServerValue(currentValue, a.cfg.QingLongServer, acc)
+	value, added := mergeYYBServerValue(currentValue, a.cfg.QingLongServer, acc, a.cfg.QingLongRefMode)
 	if err := a.qinglong.upsertEnv(ctx, "YYB_SERVER", value, remarks); err != nil {
 		return "", false, err
 	}
@@ -419,7 +450,7 @@ func firstAccountLabel(values ...*string) string {
 	return ""
 }
 
-func mergeYYBServerValue(existing, server string, acc *store.WechatAccount) (string, bool) {
+func mergeYYBServerValue(existing, server string, acc *store.WechatAccount, modes ...string) (string, bool) {
 	existing = strings.ReplaceAll(existing, "\r\n", "\n")
 	existing = strings.TrimRight(existing, "\n")
 	id := strconv.FormatInt(acc.ID, 10)
@@ -433,7 +464,13 @@ func mergeYYBServerValue(existing, server string, acc *store.WechatAccount) (str
 			return existing, false
 		}
 	}
-	entry := strings.TrimSpace(server) + "@" + id
+	refMode := ""
+	if len(modes) > 0 { refMode = modes[0] }
+	ref := id
+	if strings.EqualFold(strings.TrimSpace(refMode), "openid") && strings.TrimSpace(acc.OpenID) != "" {
+		ref = strings.TrimSpace(acc.OpenID)
+	}
+	entry := strings.TrimSpace(server) + "@" + ref
 	if existing == "" {
 		return entry, true
 	}
