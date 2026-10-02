@@ -27,7 +27,9 @@ import (
 )
 
 type Config struct {
+	MaintenanceSocket string
 	ResourceRoot      string
+	EmbeddedWebAssets bool
 	DBFilename        string
 	TCPProxy          string
 	SessionTTL        time.Duration
@@ -50,15 +52,16 @@ type Config struct {
 	IntegrationToken  string
 	// ProtocolToken protects the legacy /wx* and /wxapp/* automation routes
 	// when the service is reachable outside a trusted private network.
-	ProtocolToken     string
-	AdminUser         string
-	AdminPassword     string
-	CookieSecure      bool
-	EnablePCLogin     bool
-	SessionDuration   time.Duration
+	ProtocolToken   string
+	AdminUser       string
+	AdminPassword   string
+	CookieSecure    bool
+	EnablePCLogin   bool
+	SessionDuration time.Duration
 }
 
 type App struct {
+	updates            *updateChecker
 	cfg                Config
 	resources          resources
 	db                 *store.DB
@@ -130,7 +133,7 @@ func NewApp(cfg Config) (*App, error) {
 	if cfg.SessionDuration <= 0 {
 		cfg.SessionDuration = 7 * 24 * time.Hour
 	}
-	res, err := ensureResources(cfg.ResourceRoot)
+	res, err := ensureResources(cfg.ResourceRoot, cfg.EmbeddedWebAssets)
 	if err != nil {
 		return nil, err
 	}
@@ -169,6 +172,7 @@ func NewApp(cfg Config) (*App, error) {
 	pool := protocol.NewPool(poolCfg, db)
 	qrClient := qr.NewClient(cfg.RequestTimeout)
 	app := &App{
+		updates:            &updateChecker{client: &http.Client{Timeout: 10 * time.Second}, url: maintenanceVersionURL, fallbackURL: maintenanceVersionAPIURL, releaseURL: maintenanceReleaseBase + "/latest"},
 		cfg:                cfg,
 		resources:          res,
 		db:                 db,
@@ -251,9 +255,12 @@ func (a *App) Handler() http.Handler {
 	router.Any("/login", gin.WrapF(a.handleLogin))
 	router.Any("/register", gin.WrapF(a.handleRegister))
 	router.Any("/logout", gin.WrapF(a.handleLogout))
-	router.Any("/health", func(c *gin.Context) {
+	healthHandler := func(c *gin.Context) {
 		writeJSON(c.Writer, http.StatusOK, gin.H{"ok": true})
-	})
+	}
+	router.Any("/health", healthHandler)
+	// Compatibility for older copies of the public account cache checker.
+	router.Any("/healthz", healthHandler)
 	router.Use(func(c *gin.Context) {
 		if strings.HasPrefix(c.Request.URL.Path, "/static/") {
 			c.Header("Cache-Control", "no-cache")
@@ -294,6 +301,9 @@ func (a *App) Handler() http.Handler {
 	router.Any("/users", gin.WrapF(a.handleUsersPage))
 	router.Any("/api/auth/me", gin.WrapF(a.handleAuthMe))
 	router.GET("/api/version", gin.WrapF(a.handleVersion))
+	router.GET("/maintenance", gin.WrapF(a.handleMaintenancePage))
+	router.GET("/api/maintenance", gin.WrapF(a.handleMaintenance))
+	router.POST("/api/maintenance", gin.WrapF(a.handleMaintenance))
 	router.Any("/api/auth/profile", gin.WrapF(a.handleProfile))
 	router.Any("/api/auth/password", gin.WrapF(a.handlePassword))
 	router.Any("/api/auth/sessions", gin.WrapF(a.handleSessions))

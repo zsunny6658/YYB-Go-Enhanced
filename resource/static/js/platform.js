@@ -1,5 +1,6 @@
 (() => {
   const pages = {
+    "/maintenance": ["系统维护", "版本更新与重启"],
     "/": ["我的控制台", "账号与能力调用"],
     "/scan": ["添加账号", "微信授权"],
     "/proxies": ["代理设置", "账号网络出口"],
@@ -9,7 +10,9 @@
     "/settings": ["个人设置", "资料与安全"]
   };
   const view = new URLSearchParams(location.search).get("view");
-  const current = location.pathname === "/runs" && view === "push" ? ["独立推送", "账号通知设置"] : (pages[location.pathname] || ["YYB Go", "管理控制台"]);
+  const focus = new URLSearchParams(location.search).get("focus");
+  const contextual = location.pathname === "/runs" ? {push:["独立推送", "账号通知设置"], logs:["调用记录", "请求与运行日志"]}[view] : location.pathname === "/" ? {accounts:["我的微信账号", "账号与有效期"], test:["接口测试", "协议能力调用"]}[focus] : null;
+  const current = contextual || pages[location.pathname] || ["YYB Go", "管理控制台"];
   const main = document.querySelector("main");
   if (!main) return;
 
@@ -43,6 +46,7 @@
       ["/proxies", "proxy", "代理设置", true, false],
       ["/account-links", "link", "已激活短链接", true, true],
       ["/users", "users", "用户管理", false, true],
+      ["/maintenance", "settings", "系统维护", false, true],
       ["/settings", "settings", "个人设置", true, true]
     ]}
   ];
@@ -59,26 +63,183 @@
   shell.innerHTML = `
     <aside class="platform-sidebar" aria-label="主导航">
       <a class="platform-brand" href="/"><span class="platform-brand-mark">Y</span><span class="platform-brand-copy"><strong>YYB Go</strong><span>微信协议管理平台</span></span></a>
-      <nav class="platform-nav">${navGroups.map(group => `<div class="platform-nav-section"><div class="platform-nav-group">${group.label}</div>${group.items.map(([href, icon, label, visible, authOnly]) => `<a href="${href}" data-label="${label}" data-admin-only="${!visible}" data-auth-only="${authOnly}" ${isActive(href) ? 'aria-current="page"' : ""}><span class="platform-nav-icon">${icons[icon]}</span><span class="platform-nav-label">${label}</span></a>`).join("")}</div>`).join("")}</nav>
+      <nav class="platform-nav">${navGroups.map(group => `<div class="platform-nav-section"><div class="platform-nav-group">${group.label}</div>${group.items.map(([href, icon, label, visible, authOnly]) => `<a href="${href}" data-label="${label}" data-admin-only="${!visible}" data-auth-only="${authOnly}" ${!visible || authOnly ? 'hidden' : ''} ${isActive(href) ? 'aria-current="page"' : ""}><span class="platform-nav-icon">${icons[icon]}</span><span class="platform-nav-label">${label}</span></a>`).join("")}</div>`).join("")}</nav>
       <div class="platform-sidebar-foot"><button type="button" id="platformLogout" data-label="退出登录"><span class="platform-nav-icon">${icons.logout}</span><span class="platform-nav-label">退出登录</span></button></div>
     </aside>
     <button class="platform-overlay" id="platformOverlay" type="button" aria-label="关闭导航"></button>
     <section class="platform-stage">
       <header class="platform-topbar">
         <div style="display:flex;align-items:center;gap:12px;min-width:0"><button class="platform-menu" id="platformMenu" type="button" aria-label="打开导航">☰</button><div class="platform-page-context"><div class="platform-breadcrumb">YYB Go / ${current[1]}</div><div class="platform-page-title">${current[0]}</div></div></div>
-        <div class="platform-user"><a class="platform-build" id="platformBuild" href="https://github.com/525815266/YYB-Go-Enhanced/releases" target="_blank" rel="noreferrer" title="正在读取版本信息"><span>当前版本</span><strong>读取中</strong></a><div class="platform-user-copy"><strong id="platformUserName">正在读取</strong><span id="platformUserRole">当前用户</span></div><span class="platform-avatar" id="platformAvatar">Y</span></div>
+        <div class="platform-user"><button class="platform-build" id="platformBuild" type="button" aria-label="当前版本读取中，点击检查更新" aria-haspopup="dialog" aria-controls="platformUpdateDialog" title="检查版本与更新"><span>当前版本</span><strong>读取中</strong></button><div class="platform-user-copy"><strong id="platformUserName">正在读取</strong><span id="platformUserRole">当前用户</span></div><span class="platform-avatar" id="platformAvatar">Y</span></div>
       </header>
       <div class="platform-main"></div>
-    </section>`;
+    </section>
+    <dialog class="platform-dialog platform-update-dialog" id="platformUpdateDialog" aria-labelledby="platformUpdateTitle">
+      <div class="platform-dialog-head"><div><h2 id="platformUpdateTitle">版本与更新</h2><p id="platformUpdateDescription">检查新版本，并按当前运行环境选择更新方式。</p></div><button class="platform-dialog-close" id="platformUpdateClose" type="button" aria-label="关闭">&times;</button></div>
+      <div class="platform-dialog-body">
+        <dl class="platform-version-list">
+          <div><dt>当前版本</dt><dd id="platformCurrentVersion">读取中</dd></div>
+          <div><dt>最新版本</dt><dd id="platformLatestVersion">尚未检查</dd></div>
+        </dl>
+        <div class="platform-update-status" id="platformUpdateStatus" role="status" aria-live="polite">点击版本号后自动检查更新。</div>
+        <a class="platform-update-docs" href="/maintenance">打开系统维护</a>
+      </div>
+      <div class="platform-dialog-actions"><button class="btn secondary" id="platformUpdateCheck" type="button">重新检查</button><button class="btn primary" id="platformUpdateApply" type="button" disabled>更新并重启</button></div>
+    </dialog>`;
   document.body.insertBefore(shell, document.body.firstChild);
   shell.querySelector(".platform-main").appendChild(main);
   document.body.classList.add("platform-ready");
 
-  const closeNav = () => document.body.classList.remove("platform-nav-open");
-  document.getElementById("platformMenu").onclick = () => document.body.classList.toggle("platform-nav-open");
+  const menu = document.getElementById("platformMenu");
+  const sidebar = shell.querySelector(".platform-sidebar");
+  const mobileNav = matchMedia("(max-width: 860px)");
+  sidebar.id = "platformNavigation";
+  menu.setAttribute("aria-controls", sidebar.id);
+  menu.setAttribute("aria-expanded", "false");
+  document.getElementById("platformOverlay").tabIndex = -1;
+  const closeNav = () => {
+    const restore = document.body.classList.contains("platform-nav-open");
+    document.body.classList.remove("platform-nav-open");
+    menu.setAttribute("aria-expanded", "false");
+    sidebar.inert = mobileNav.matches;
+    if (restore && mobileNav.matches) menu.focus();
+  };
+  menu.onclick = () => {
+    if (document.body.classList.contains("platform-nav-open")) return closeNav();
+    document.body.classList.add("platform-nav-open");
+    sidebar.inert = false;
+    menu.setAttribute("aria-expanded", "true");
+    sidebar.querySelector('a[aria-current="page"]')?.focus();
+  };
+  mobileNav.addEventListener("change", closeNav);
+  closeNav();
+  document.addEventListener("keydown", event => {
+    if (!document.body.classList.contains("platform-nav-open")) return;
+    if (event.key === "Escape") { event.preventDefault(); closeNav(); }
+    if (event.key === "Tab") {
+      const links = [...sidebar.querySelectorAll("a, button")].filter(el => el.getClientRects().length);
+      const first = links[0], last = links[links.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    }
+  });
   document.getElementById("platformOverlay").onclick = closeNav;
   shell.querySelectorAll(".platform-nav a").forEach(link => link.addEventListener("click", closeNav));
   document.getElementById("platformLogout").onclick = async () => { await fetch("/logout", { method: "POST" }); location.href = "/login"; };
+
+  let currentVersion = "", updateTarget = "", maintenanceAllowed = false, updatePolling = false, updateStopped = false, runtimeInfo = {};
+  const updateDialog = document.getElementById("platformUpdateDialog");
+  const updateStatus = document.getElementById("platformUpdateStatus");
+  const updateCheck = document.getElementById("platformUpdateCheck");
+  const updateApply = document.getElementById("platformUpdateApply");
+  const setUpdateStatus = (text, state = "") => {
+    updateStatus.textContent = text;
+    updateStatus.dataset.state = state;
+  };
+  const maintenanceApi = async (options = {}, check = false) => {
+    const response = await fetch(`/api/maintenance${check ? "?check=1" : ""}`, {
+      ...options,
+      signal: AbortSignal.timeout(15000),
+      headers: { "Content-Type": "application/json", "X-YYB-Maintenance": "1" }
+    });
+    const body = await response.json();
+    if (!response.ok || body.code !== 0) throw new Error(body.msg || "维护请求失败");
+    return body.data || {};
+  };
+  const renderMaintenance = data => {
+    currentVersion = data.version || currentVersion;
+    updateTarget = data.latest_version || updateTarget;
+    runtimeInfo = data.runtime || {};
+    document.getElementById("platformCurrentVersion").textContent = currentVersion ? `v${currentVersion}` : "未知";
+    document.getElementById("platformLatestVersion").textContent = updateTarget ? `v${updateTarget}` : "检查失败";
+    document.getElementById("platformUpdateDescription").textContent = runtimeInfo.label ? `${runtimeInfo.label}，${runtimeInfo.instructions || "请选择适用的更新方式。"}` : "检查新版本，并按当前运行环境选择更新方式。";
+    const running = Boolean(data.agent?.job?.running);
+    const managed = data.managed_update === true || runtimeInfo.managed_update === true;
+    const downloadable = runtimeInfo.download_available === true && Boolean(runtimeInfo.download_url);
+    updateCheck.disabled = running;
+    updateApply.disabled = running || data.has_update !== true || (!managed && !downloadable);
+    updateApply.dataset.mode = managed ? "managed" : (downloadable ? "download" : "none");
+    if (data.has_update === true && updateTarget && managed) updateApply.textContent = `更新到 v${updateTarget} 并重启`;
+    else if (data.has_update === true && updateTarget && downloadable) updateApply.textContent = `下载 ${runtimeInfo.label || "当前平台"} v${updateTarget}`;
+    else updateApply.textContent = "已是最新版本";
+    if (data.check_error) setUpdateStatus(data.check_error, "error");
+    else if (running && data.agent?.job?.message) setUpdateStatus(data.agent.job.message, "working");
+    else if (data.has_update === true && managed) setUpdateStatus(`发现新版本 v${updateTarget}，更新会保留现有配置和账号数据。`, "update");
+    else if (data.has_update === true && downloadable) setUpdateStatus(`发现新版本 v${updateTarget}。下载后请按上方说明替换当前程序。`, "update");
+    else if (!managed && !downloadable) setUpdateStatus(data.message || "当前平台没有可用的预编译更新包。", "warning");
+    else if (data.has_update === false && updateTarget) setUpdateStatus(`当前已经是最新版本（v${currentVersion}）。`, "ok");
+    else if (data.agent?.job?.message) setUpdateStatus(data.agent.job.message, "ok");
+    else setUpdateStatus("当前已经是最新版本。", "ok");
+    return running;
+  };
+  const checkMaintenance = async () => {
+    updateCheck.disabled = true;
+    updateApply.disabled = true;
+    document.getElementById("platformLatestVersion").textContent = "检查中";
+    setUpdateStatus("正在检查最新版本…", "working");
+    try { return renderMaintenance(await maintenanceApi({}, true)); }
+    catch (error) { setUpdateStatus(error.message, "error"); updateCheck.disabled = false; return false; }
+  };
+  const pollMaintenance = async () => {
+    if (updatePolling) return;
+    updatePolling = true;
+    const deadline = Date.now() + 12 * 60 * 1000;
+    try {
+      while (!updateStopped && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        try {
+          const data = await maintenanceApi();
+          const running = renderMaintenance(data);
+          if (running) continue;
+          const versionResponse = await fetch("/api/version", { signal: AbortSignal.timeout(10000) });
+          const versionBody = await versionResponse.json();
+          const installed = versionBody?.data?.version || data.version;
+          if (updateTarget && installed === updateTarget) {
+            setUpdateStatus(`v${installed} 更新完成，正在加载新版本…`, "ok");
+            setTimeout(() => location.reload(), 900);
+          }
+          return;
+        } catch { setUpdateStatus("服务正在更新并重启，等待重新连接…", "working"); }
+      }
+      if (!updateStopped) setUpdateStatus("等待更新超时，请刷新页面核对服务状态。", "error");
+    } finally { updatePolling = false; }
+  };
+  document.getElementById("platformBuild").onclick = () => {
+    updateDialog.showModal();
+    if (!maintenanceAllowed) {
+      setUpdateStatus("仅管理员可以检查并执行在线更新。", "warning");
+      updateCheck.disabled = true;
+      updateApply.disabled = true;
+      return;
+    }
+    void checkMaintenance().then(running => { if (running) void pollMaintenance(); });
+  };
+  document.getElementById("platformUpdateClose").onclick = () => updateDialog.close();
+  updateDialog.addEventListener("click", event => { if (event.target === updateDialog) updateDialog.close(); });
+  updateCheck.onclick = () => { if (maintenanceAllowed) void checkMaintenance(); };
+  updateApply.onclick = async () => {
+    if (updateApply.disabled || !updateTarget) return;
+    if (updateApply.dataset.mode === "download") {
+      location.assign(runtimeInfo.download_url);
+      return;
+    }
+    if (updateApply.dataset.mode !== "managed") return;
+    updateApply.disabled = true;
+    updateCheck.disabled = true;
+    setUpdateStatus(`正在提交 v${updateTarget} 更新任务…`, "working");
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    const requestID = Array.from(bytes, value => value.toString(16).padStart(2, "0")).join("");
+    try {
+      await maintenanceApi({ method: "POST", body: JSON.stringify({ action: "update", confirm: true, request_id: requestID }) });
+      setUpdateStatus("更新任务已提交，正在拉取镜像。当前服务会在镜像就绪后重启。", "working");
+      void pollMaintenance();
+    } catch (error) {
+      setUpdateStatus(error.message, "error");
+      updateCheck.disabled = false;
+      updateApply.disabled = false;
+    }
+  };
+  window.addEventListener("pagehide", () => { updateStopped = true; });
 
   fetch("/api/version").then(async response => {
     const body = await response.json();
@@ -88,13 +249,16 @@
     const build = document.getElementById("platformBuild");
     build.querySelector("strong").textContent = `v${version}`;
     build.querySelector("span").textContent = "当前版本";
-    build.href = info.update_url || build.href;
-    build.title = `当前版本 v${version}`;
+    currentVersion = version;
+    document.getElementById("platformCurrentVersion").textContent = `v${version}`;
+    build.title = `当前版本 v${version}，点击检查更新`;
+    build.setAttribute("aria-label", `当前版本 v${version}，点击检查更新`);
   }).catch(() => {
     const build = document.getElementById("platformBuild");
     build.querySelector("strong").textContent = "未知";
     build.querySelector("span").textContent = "当前版本";
     build.title = "无法读取版本信息";
+    build.setAttribute("aria-label", "当前版本未知，点击重新检查");
   });
 
   fetch("/api/auth/me").then(async response => {
@@ -110,13 +274,16 @@
     document.getElementById("platformUserName").textContent = name;
     document.getElementById("platformUserRole").textContent = authEnabled ? (user.role === "admin" ? "管理员" : "普通用户") : "本机模式";
     const roleLabel = authEnabled ? (user.role === "admin" ? "管理员" : "普通用户") : "本机模式";
+    maintenanceAllowed = authEnabled && user.role === "admin";
+    if (updateDialog.open && maintenanceAllowed) void checkMaintenance().then(running => { if (running) void pollMaintenance(); });
     const roleStat = document.getElementById("currentRoleText");
     const quotaStat = document.getElementById("currentQuotaText");
     if (roleStat) roleStat.textContent = roleLabel;
     if (quotaStat) quotaStat.textContent = "无限制";
     document.getElementById("platformAvatar").textContent = Array.from(name)[0]?.toUpperCase() || "Y";
-    shell.querySelectorAll('[data-admin-only="true"]').forEach(link => { link.hidden = user.role !== "admin"; });
-    shell.querySelectorAll('[data-auth-only="true"]').forEach(link => { link.hidden = !authEnabled; });
+    shell.querySelectorAll('.platform-nav a').forEach(link => {
+      link.hidden = (link.dataset.adminOnly === "true" && user.role !== "admin") || (link.dataset.authOnly === "true" && !authEnabled);
+    });
     const repairAccountsButton = document.getElementById("repairAccountsBtn");
     if (repairAccountsButton) repairAccountsButton.hidden = authEnabled && user.role !== "admin";
     document.querySelector(".platform-sidebar-foot").hidden = !authEnabled;

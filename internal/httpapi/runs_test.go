@@ -266,6 +266,21 @@ func TestQingLongRepoRoots(t *testing.T) {
 	}
 }
 
+func TestParseScriptKeyFromCronNormalizesWindowsSeparators(t *testing.T) {
+	repos := []string{"525815266_YYB-Go-Enhanced/scripts"}
+	cron := qingLongCron{
+		Name:    "京东签到",
+		Command: `task \525815266_YYB-Go-Enhanced\scripts\weile_coin.py`,
+	}
+	key, repo, ok := parseScriptKeyFromCron(cron, repos)
+	if !ok {
+		t.Fatal("Windows-style task command was not recognized")
+	}
+	if key != "weile_coin.py" || repo != repos[0] {
+		t.Fatalf("parsed task = %q in repo %q, want weile_coin.py in %q", key, repo, repos[0])
+	}
+}
+
 func apiRequest(t *testing.T, handler http.Handler, method, path string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	var raw []byte
@@ -324,6 +339,31 @@ func TestAccountJobsAreIsolatedDisabledByDefaultAndRunExplicitly(t *testing.T) {
 	defer fake.mu.Unlock()
 	if len(fake.runIDs) != 1 {
 		t.Fatalf("explicit run IDs = %v", fake.runIDs)
+	}
+}
+
+func TestAccountJobsShowCurrentPanelSchedule(t *testing.T) {
+	fake, server := newFakeQingLong(t)
+	_, handler, ref := newRunsTestApp(t, server.URL)
+
+	enable := apiRequest(t, handler, http.MethodPut, "/api/qinglong/jobs/enable", map[string]any{
+		"ref": ref, "script_key": "MDHY.js", "enabled": true,
+	})
+	if enable.Code != http.StatusOK {
+		t.Fatalf("enable response = %d %s", enable.Code, enable.Body.String())
+	}
+
+	fake.mu.Lock()
+	for i := range fake.crons {
+		if strings.HasPrefix(fake.crons[i].Name, "[YYB:") {
+			fake.crons[i].Schedule = "17 6 * * *"
+		}
+	}
+	fake.mu.Unlock()
+
+	list := apiRequest(t, handler, http.MethodGet, "/api/qinglong/jobs?ref="+url.QueryEscape(ref), nil)
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"schedule":"17 6 * * *"`) {
+		t.Fatalf("jobs did not expose current panel schedule: %d %s", list.Code, list.Body.String())
 	}
 }
 
