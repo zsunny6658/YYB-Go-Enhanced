@@ -40,11 +40,13 @@ services:
       YYB_PROTOCOL_TOKEN: ${YYB_PROTOCOL_TOKEN:-}
       YYB_INTEGRATION_TOKEN: ${YYB_INTEGRATION_TOKEN:-}
       YYB_QINGLONG_REF_MODE: ${YYB_QINGLONG_REF_MODE:-id}
+      YYB_QL_SCRIPTS_DIR: ${YYB_QL_SCRIPTS_DIR:-/ql-scripts}
       YYB_ENABLE_PC_LOGIN: ${YYB_ENABLE_PC_LOGIN:-false}
     volumes:
       - ./data/db:/app/resource/db
       - ./data/avatars:/app/resource/avatars
       - ./data/qr:/app/resource/qr
+      - /var/apps/docker-qinglong/shares/qinglong/scripts:/ql-scripts:ro
     ports:
       - "0.0.0.0:9001:8000"
     networks:

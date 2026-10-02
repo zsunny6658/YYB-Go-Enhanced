@@ -46,6 +46,7 @@ type Config struct {
 	QingLongServer    string
 	QingLongRepo      string
 	QingLongRefMode   string
+	QingLongScriptsDir string
 	AuthDriver        string
 	AuthDSN           string
 	AuthMySQLDSN      string
@@ -342,6 +343,11 @@ func (a *App) Handler() http.Handler {
 	router.Any("/api/qinglong/config", gin.WrapF(a.handleQingLongConfig))
 	router.Any("/api/qinglong/sync", gin.WrapF(a.handleQingLongSync))
 	router.Any("/api/qinglong/sync-all", gin.WrapF(a.handleQingLongSyncAll))
+	router.Any("/api/qinglong/sync-aggregated", gin.WrapF(a.handleQingLongSyncAggregated))
+	router.Any("/api/qinglong/script-env-mapping", gin.WrapF(a.handleQingLongScriptEnvMappingList))
+	router.Any("/api/qinglong/script-env-mapping/upsert", gin.WrapF(a.handleQingLongScriptEnvMappingUpsert))
+	router.Any("/api/qinglong/script-env-mapping/delete", gin.WrapF(a.handleQingLongScriptEnvMappingDelete))
+	router.Any("/api/qinglong/script-env-mapping/seed", gin.WrapF(a.handleQingLongSeedMapping))
 	router.Any("/api/qinglong/jobs", gin.WrapF(a.handleQingLongJobs))
 	router.Any("/api/qinglong/jobs/enable", gin.WrapF(a.handleQingLongJobEnable))
 	router.Any("/api/qinglong/jobs/run", gin.WrapF(a.handleQingLongJobRun))

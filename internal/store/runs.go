@@ -44,6 +44,28 @@ FROM account_script_jobs WHERE account_id=? ORDER BY script_key`, accountID)
 	return out, rows.Err()
 }
 
+// ListAccountScriptJobsByScript returns every account_script_jobs row
+// without filtering by account. It is used by the aggregated-sync path
+// to discover which scripts have at least one account enabled.
+func (db *DB) ListAccountScriptJobsByScript(ctx context.Context) ([]AccountScriptJob, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+SELECT id, account_id, script_key, ql_cron_id, schedule, created_at, updated_at
+FROM account_script_jobs ORDER BY account_id, script_key`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]AccountScriptJob, 0)
+	for rows.Next() {
+		var job AccountScriptJob
+		if err := rows.Scan(&job.ID, &job.AccountID, &job.ScriptKey, &job.QLCronID, &job.Schedule, &job.CreatedAt, &job.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, job)
+	}
+	return out, rows.Err()
+}
+
 func (db *DB) GetAccountScriptJob(ctx context.Context, accountID int64, scriptKey string) (*AccountScriptJob, error) {
 	var job AccountScriptJob
 	err := db.sql.QueryRowContext(ctx, `

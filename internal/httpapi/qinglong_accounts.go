@@ -337,6 +337,12 @@ func (a *App) autoSyncAfterScan(acc *store.WechatAccount) {
 		if _, _, err := a.syncAccountToQingLong(ctx, account); err != nil {
 			log.Printf("[auto-sync] account %d panel sync failed: %v", account.ID, err)
 		}
+		// Also refresh the aggregated (per-script shared env) sync so new or
+		// rescanned accounts appear in every script's openid list without a
+		// manual trigger. Best-effort: log only on failure.
+		if _, aggErr := a.syncAggregated(ctx); aggErr != nil {
+			log.Printf("[auto-sync] account %d aggregated sync failed: %v", account.ID, aggErr)
+		}
 	}(acc)
 }
 

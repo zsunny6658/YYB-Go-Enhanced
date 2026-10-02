@@ -120,6 +120,15 @@ CREATE TABLE IF NOT EXISTS account_links (
     created_at      INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_account_links_expires ON account_links(expires_at);
+
+CREATE TABLE IF NOT EXISTS script_env_mapping (
+    script_key     TEXT    PRIMARY KEY,
+    env_name       TEXT    NOT NULL,
+    source         TEXT    NOT NULL DEFAULT '',
+    updated_at     INTEGER NOT NULL,
+    created_at     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_script_env_mapping_env ON script_env_mapping(env_name);
 `
 
 var defaultFeatures = []Feature{
