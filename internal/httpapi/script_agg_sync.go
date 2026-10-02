@@ -139,7 +139,7 @@ func emptyAggregateResult() *AggregateSyncResult {
 // handleQingLongSyncAggregated is the HTTP entry point for a manual
 // "aggregate-sync" trigger. Also invoked from autoSyncAfterScan.
 func (a *App) handleQingLongSyncAggregated(w http.ResponseWriter, r *http.Request) {
-	if !requireAdmin(w, r) {
+	if a.auth != nil && !requireAdmin(w, r) {
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -462,7 +462,7 @@ type scriptEnvMappingIn struct {
 }
 
 func (a *App) handleQingLongScriptEnvMappingList(w http.ResponseWriter, r *http.Request) {
-	if !requireAdmin(w, r) {
+	if a.auth != nil && !requireAdmin(w, r) {
 		return
 	}
 	mappings, err := a.db.ListScriptEnvMappings(r.Context())
@@ -474,7 +474,7 @@ func (a *App) handleQingLongScriptEnvMappingList(w http.ResponseWriter, r *http.
 }
 
 func (a *App) handleQingLongScriptEnvMappingUpsert(w http.ResponseWriter, r *http.Request) {
-	if !requireAdmin(w, r) {
+	if a.auth != nil && !requireAdmin(w, r) {
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -503,7 +503,7 @@ func (a *App) handleQingLongScriptEnvMappingUpsert(w http.ResponseWriter, r *htt
 }
 
 func (a *App) handleQingLongScriptEnvMappingDelete(w http.ResponseWriter, r *http.Request) {
-	if !requireAdmin(w, r) {
+	if a.auth != nil && !requireAdmin(w, r) {
 		return
 	}
 	if r.Method != http.MethodDelete && r.Method != http.MethodPost {
@@ -525,7 +525,7 @@ func (a *App) handleQingLongScriptEnvMappingDelete(w http.ResponseWriter, r *htt
 
 // handleQingLongSeedMapping seeds the mapping table from existing QL envs.
 func (a *App) handleQingLongSeedMapping(w http.ResponseWriter, r *http.Request) {
-	if !requireAdmin(w, r) {
+	if a.auth != nil && !requireAdmin(w, r) {
 		return
 	}
 	if r.Method != http.MethodPost {
