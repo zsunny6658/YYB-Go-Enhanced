@@ -109,6 +109,9 @@ func (a *App) syncAggregated(ctx context.Context) (*AggregateSyncResult, error) 
 	}
 
 	result := emptyAggregateResult()
+	// Deduplicate by env_name: many scripts share the same wx_openid env,
+	// we upsert once per distinct env variable.
+	envByKey := map[string][]string{} // env_name -> script keys
 	for _, m := range mappings {
 		envName := strings.TrimSpace(m.EnvName)
 		if envName == "" {
@@ -116,8 +119,11 @@ func (a *App) syncAggregated(ctx context.Context) (*AggregateSyncResult, error) 
 			continue
 		}
 		result.ScriptEnvHits = append(result.ScriptEnvHits, m.ScriptKey)
+		envByKey[envName] = append(envByKey[envName], m.ScriptKey)
+	}
+	for envName := range envByKey {
 		if err := a.qinglong.upsertEnv(ctx, envName, newValue, remarks); err != nil {
-			result.FailedScripts = append(result.FailedScripts, m.ScriptKey)
+			result.FailedScripts = append(result.FailedScripts, envByKey[envName]...)
 			continue
 		}
 		result.UpdatedEnvs = append(result.UpdatedEnvs, envName)
@@ -235,6 +241,13 @@ func inferOpenidEnvName(src []byte, path string) string {
 		all = append(all, name)
 	}
 
+	// If the script references the shared wx_openid variable, it is almost
+	// certainly the openid carrier (these scripts run under the wx-proxy
+	// stack: process.env.wx_openid holds the per-account id list).
+	if seen["wx_openid"] {
+		return "wx_openid"
+	}
+
 	stem := strings.ToLower(strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)))
 	scored := map[string]int{}
 	for _, name := range all {
@@ -279,23 +292,88 @@ func inferOpenidEnvName(src []byte, path string) string {
 	return ""
 }
 
-// seedGroundTruthFromQL scans existing QingLong envs and seeds
-// script_env_mapping rows where an env value already looks like an
-// openid. This gives ground-truth script->env associations without
-// relying on script source.
+// seedGroundTruthFromQL seeds the mapping table from the mounted QingLong
+// script sources. For each wxapp script it infers the real openid env
+// variable from its source (e.g. fhxmh.js reads wx_openid, not "fhxmh").
+// Scripts that share the same env variable (wx_openid) collapse onto one
+// row keyed by the env name — mirroring the aggregate-sync semantics.
 func (a *App) seedGroundTruthFromQL(ctx context.Context) ([]string, error) {
-	envs, err := a.qinglong.listEnvs(ctx, "")
+	mountRoot := strings.TrimSpace(a.cfg.QingLongScriptsDir)
+	seeded := []string{}
+	if mountRoot == "" {
+		return nil, fmt.Errorf("脚本目录未挂载（QingLongScriptsDir 为空）")
+	}
+	type hit struct {
+		scriptKey string
+		envName   string
+	}
+	var hits []hit
+	err := filepath.WalkDir(mountRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if filepath.Ext(path) != ".js" && filepath.Ext(path) != ".py" {
+			return nil
+		}
+		// Only consider scripts under the wxapp directory to reduce noise.
+		if !strings.Contains(path, "wxapp") {
+			return nil
+		}
+		// Skip backup/stale repo copies that mirror the wx app scripts.
+		if strings.Contains(path, "/bak-") {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		envName := inferOpenidEnvName(data, path)
+		if envName == "" {
+			return nil
+		}
+		rel, relErr := filepath.Rel(mountRoot, path)
+		if relErr != nil {
+			return nil
+		}
+		hits = append(hits, hit{rel, envName})
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	seeded := []string{}
+	// We still want to tolerate scripts whose source can't be read but that
+	// exist as a env named like the script. But ground-truth first: for a
+	// script we could infer from source, use that. For scripts we could NOT
+	// infer, fall back to env-name==script-name via QL envs (below).
+	//
+	// Upsert each script->env from the source scan. Multiple scripts sharing
+	// env -> each gets its own row (dedup happens at sync time).
+	checked := map[string]bool{}
+	for _, h := range hits {
+		checked[h.scriptKey] = true
+		if _, upErr := a.db.UpsertScriptEnvMapping(ctx, h.scriptKey, h.envName, scriptEnvSourceAuto); upErr != nil {
+			continue
+		}
+		seeded = append(seeded, h.scriptKey+"→"+h.envName)
+	}
+
+	// Fallback for scripts with no matching openid var in source but whose
+	// basename matches an existing openid-looking QL env (the 72 created
+	// earlier). This covers token-class scripts where openid is implicit.
+	envs, envErr := a.qinglong.listEnvs(ctx, "")
+	if envErr != nil {
+		return seeded, nil
+	}
 	for _, e := range envs {
 		value := strings.TrimSpace(e.Value)
 		if value == "" || !looksLikeOpenidValue(value) {
 			continue
 		}
 		scriptKey, err := a.inferScriptKeyForEnv(ctx, e.Name)
-		if err != nil || scriptKey == "" {
+		if err != nil || scriptKey == "" || checked[scriptKey] {
 			continue
 		}
 		if _, upErr := a.db.UpsertScriptEnvMapping(ctx, scriptKey, e.Name, scriptEnvSourceGround); upErr != nil {
