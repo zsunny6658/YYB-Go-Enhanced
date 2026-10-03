@@ -47,6 +47,11 @@ type Config struct {
 	QingLongRepo      string
 	QingLongRefMode   string
 	QingLongScriptsDir string
+	// QingLongTaskBeforePath is the (mounted, writable) absolute path to the
+	// QingLong config/task_before.sh file. When set, syncAggregated also
+	// rewrites the openid exports in that file so runtime env injection stays
+	// consistent with the aggregated multi-account openids written to the DB.
+	QingLongTaskBeforePath string
 	AuthDriver        string
 	AuthDSN           string
 	AuthMySQLDSN      string

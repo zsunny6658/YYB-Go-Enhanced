@@ -114,6 +114,7 @@ func main() {
 		QingLongRepo:      os.Getenv("YYB_QINGLONG_REPO"),
 		QingLongRefMode:   getEnvWithFallback("YYB_QINGLONG_REF_MODE", "YYB_ACCOUNT_REF_MODE"),
 		QingLongScriptsDir: os.Getenv("YYB_QL_SCRIPTS_DIR"),
+		QingLongTaskBeforePath: os.Getenv("YYB_QL_TASK_BEFORE_SH"),
 		AuthDriver:        authDriver,
 		AuthDSN:           os.Getenv("YYB_AUTH_DSN"),
 		AuthMySQLDSN:      legacyAuthDSN,

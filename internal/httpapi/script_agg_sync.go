@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Aggregated mode merges the openids of all accounts into a single
@@ -39,6 +41,10 @@ type AggregateSyncResult struct {
 	FailedScripts   []string `json:"failed_scripts"`
 	ScriptEnvHits   []string `json:"script_env_hits"`
 	ScriptEnvMisses []string `json:"script_env_misses"`
+	// TaskBeforeErr, when non-empty, holds an error from trying to keep
+	// the QingLong config/task_before.sh openid exports in sync with the
+	// aggregated openid value (e.g. the mount is not writable).
+	TaskBeforeErr string `json:"task_before_err,omitempty"`
 }
 
 // resolveScriptEnvName returns the QingLong env variable name for the
@@ -132,6 +138,12 @@ func (a *App) syncAggregated(ctx context.Context) (*AggregateSyncResult, error) 
 	sort.Strings(result.FailedScripts)
 	sort.Strings(result.ScriptEnvHits)
 	sort.Strings(result.ScriptEnvMisses)
+	// Keep the QingLong config/task_before.sh openid exports consistent with
+	// the aggregated value we just wrote to the DB. This is best-effort: a
+	// missing/writable-unavailable mount is reported in the result flag.
+	if err := a.syncTaskBeforeSh(ctx, newValue); err != nil {
+		result.TaskBeforeErr = err.Error()
+	}
 	return result, nil
 }
 
@@ -622,4 +634,73 @@ func (a *App) handleQingLongSeedMapping(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"seeded": seeded, "count": len(seeded),
 	})
+}
+
+// envExportRe matches a `export NAME=value` line in QingLong's
+// task_before.sh. Value is captured raw (may be quoted single/double).
+var envExportRe = regexp.MustCompile(`^export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$`)
+
+// isOpenidValue reports whether a (trimmed, unquoted) task_before.sh value
+// looks like a WeChat openid we manage (starts with the openid prefix and
+// may be `&`-concatenated across accounts).
+func isOpenidValue(v string) bool {
+	return strings.HasPrefix(v, "owNAX6g") || strings.HasPrefix(v, "owNA")
+}
+
+// syncTaskBeforeSh keeps the QingLong config/task_before.sh openid exports
+// aligned with the aggregated openid value just written to the QL DB.
+//
+// It only rewrites export lines whose current value is an openid (whatever
+// the variable name), replacing them with the aggregated value. Non-openid
+// exports (limits, SMTP, tokens, e.g. zmnlxq which holds a numeric id) are
+// left untouched. A timestamped backup is written alongside before modify.
+//
+// If the configured path is empty or not writable, a non-fatal error is
+// returned (recorded in AggregateSyncResult.TaskBeforeErr) so the DB-side
+// upsert still succeeds.
+func (a *App) syncTaskBeforeSh(ctx context.Context, aggregatedOpenid string) error {
+	p := a.cfg.QingLongTaskBeforePath
+	if strings.TrimSpace(p) == "" {
+		return nil // feature disabled
+	}
+	original, err := os.ReadFile(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("task_before.sh not found at %s: %w", p, err)
+		}
+		return fmt.Errorf("read task_before.sh: %w", err)
+	}
+	// Skip if already consistent (no changes) to avoid rewriting every time.
+	lines := strings.Split(string(original), "\n")
+	changed := false
+	for i, ln := range lines {
+		m := envExportRe.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		name := m[1]
+		rawVal := m[2]
+		val := strings.TrimSpace(rawVal)
+		val = strings.Trim(val, `"\'`)
+		if !isOpenidValue(val) {
+			continue
+		}
+		if val == aggregatedOpenid {
+			continue
+		}
+		esc := strings.ReplaceAll(aggregatedOpenid, "'", "'\\''")
+		lines[i] = fmt.Sprintf("export %s='%s'", name, esc)
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	// Backup original with a timestamp suffix.
+	if err := os.WriteFile(p+".bak."+strconv.FormatInt(time.Now().Unix(), 10), original, 0o644); err != nil {
+		return fmt.Errorf("backup task_before.sh: %w", err)
+	}
+	if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		return fmt.Errorf("write task_before.sh: %w", err)
+	}
+	return nil
 }
